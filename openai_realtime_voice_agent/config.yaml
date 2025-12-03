@@ -18,11 +18,21 @@ options:
   websocket_port: 8080
   ha_mcp_url: ""
   longlived_token: ""
+  # Turn detection settings
+  vad_threshold: 0.5
+  vad_prefix_padding_ms: 300
+  vad_silence_duration_ms: 500
+  # OpenAI instructions
+  instructions: "You are the Home Assistant Voice Agent and can control the Smart Home."
 schema:
   openai_api_key: password
   websocket_port: int(1024,65535)
   ha_mcp_url: str
   longlived_token: password
+  vad_threshold: float(0.0,1.0)
+  vad_prefix_padding_ms: int
+  vad_silence_duration_ms: int
+  instructions: str
 #image: ghcr.io/yourusername/ha-openai-realtime/{arch}
 
 

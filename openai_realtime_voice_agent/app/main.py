@@ -30,6 +30,14 @@ class Application:
         openai_api_key = os.environ.get("OPENAI_API_KEY")
         websocket_port = int(os.environ.get("WEBSOCKET_PORT", "8080"))
         
+        # Get turn detection settings with defaults
+        vad_threshold = float(os.environ.get("VAD_THRESHOLD", "0.5"))
+        vad_prefix_padding_ms = int(os.environ.get("VAD_PREFIX_PADDING_MS", "300"))
+        vad_silence_duration_ms = int(os.environ.get("VAD_SILENCE_DURATION_MS", "500"))
+        
+        # Get instructions with default
+        instructions = os.environ.get("INSTRUCTIONS", "You are the Home Assistant Voice Agent and can control the Smart Home.")
+        
         if not openai_api_key:
             raise ValueError("OPENAI_API_KEY environment variable is required")
         
@@ -49,7 +57,15 @@ class Application:
         
         # Start WebSocket Server (it will create OpenAI sessions per client)
         logger.info("Starting WebSocket Server...")
-        self.websocket_server = WebSocketServer(websocket_port, openai_api_key, True)
+        self.websocket_server = WebSocketServer(
+            websocket_port, 
+            openai_api_key, 
+            enable_recording=False,
+            vad_threshold=vad_threshold,
+            vad_prefix_padding_ms=vad_prefix_padding_ms,
+            vad_silence_duration_ms=vad_silence_duration_ms,
+            instructions=instructions
+        )
         await self.websocket_server.start()
         
         logger.info("Application initialized successfully")

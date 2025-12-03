@@ -18,13 +18,19 @@ logger = logging.getLogger(__name__)
 class OpenAIRealtimeClient:
     """Client for OpenAI Realtime API with WebSocket connection."""
     
-    def __init__(self, api_key: str, disconnect_callback: Optional[Callable[[], Awaitable[None]]] = None):
+    def __init__(self, api_key: str, disconnect_callback: Optional[Callable[[], Awaitable[None]]] = None,
+                 vad_threshold: float = 0.5, vad_prefix_padding_ms: int = 300,
+                 vad_silence_duration_ms: int = 500, instructions: str = "You are the Home Assistant Voice Agent and can control the Smart Home."):
         """
         Initialize OpenAI Realtime client.
         
         Args:
             api_key: OpenAI API key
             disconnect_callback: Optional async callback function to disconnect the client (for tools)
+            vad_threshold: VAD threshold (0.0-1.0)
+            vad_prefix_padding_ms: Prefix padding in milliseconds
+            vad_silence_duration_ms: Silence duration in milliseconds
+            instructions: OpenAI instructions for the assistant
         """
         self.api_key = api_key
         self.client = OpenAI(api_key=api_key)
@@ -53,6 +59,12 @@ class OpenAIRealtimeClient:
         self._bytes_per_sample = 2  # 16-bit = 2 bytes
         self._bytes_per_100ms = (self._sample_rate * self._bytes_per_sample * 100) // 1000  # 4800 bytes
         self._audio_buffer: bytes = b""
+        
+        # Store turn detection and instruction settings
+        self.vad_threshold = vad_threshold
+        self.vad_prefix_padding_ms = vad_prefix_padding_ms
+        self.vad_silence_duration_ms = vad_silence_duration_ms
+        self.instructions = instructions
         
         # Tool support
         self._disconnect_callback = disconnect_callback
@@ -123,9 +135,9 @@ class OpenAIRealtimeClient:
                     },
                     "turn_detection": {
                         "type": "server_vad",
-                        "threshold": 0.5,
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": 500,
+                        "threshold": self.vad_threshold,
+                        "prefix_padding_ms": self.vad_prefix_padding_ms,
+                        "silence_duration_ms": self.vad_silence_duration_ms,
                         "create_response": False,
                         "interrupt_response": True
                     }
@@ -145,7 +157,7 @@ class OpenAIRealtimeClient:
                 }
             },
             "output_modalities": ["audio"],
-            "instructions": "Du bist der Hüter des Hauses und kannst das Smart Home steuern.",
+            "instructions": self.instructions,
             "tools": tools
         }
         

@@ -14,7 +14,9 @@ logger = logging.getLogger(__name__)
 class WebSocketServer:
     """WebSocket server for real-time audio streaming with OpenAI."""
     
-    def __init__(self, port: int, openai_api_key: str, enable_recording: bool = True):
+    def __init__(self, port: int, openai_api_key: str, enable_recording: bool = True,
+                 vad_threshold: float = 0.5, vad_prefix_padding_ms: int = 300,
+                 vad_silence_duration_ms: int = 500, instructions: str = "You are the Home Assistant Voice Agent and can control the Smart Home."):
         """
         Initialize WebSocket server.
         
@@ -22,6 +24,10 @@ class WebSocketServer:
             port: Port to run the server on
             openai_api_key: OpenAI API key for creating client sessions
             enable_recording: Enable audio recording for debugging
+            vad_threshold: VAD threshold (0.0-1.0)
+            vad_prefix_padding_ms: Prefix padding in milliseconds
+            vad_silence_duration_ms: Silence duration in milliseconds
+            instructions: OpenAI instructions for the assistant
         """
         self.port = port
         self.openai_api_key = openai_api_key
@@ -33,6 +39,12 @@ class WebSocketServer:
         # Audio recording for debugging
         self.enable_recording = enable_recording
         self.recorders: dict = {}  # Map of websocket to AudioRecorder
+        
+        # Store turn detection and instruction settings
+        self.vad_threshold = vad_threshold
+        self.vad_prefix_padding_ms = vad_prefix_padding_ms
+        self.vad_silence_duration_ms = vad_silence_duration_ms
+        self.instructions = instructions
         
     async def _handle_client(self, websocket: websockets.WebSocketServerProtocol):
         """Handle a new WebSocket client connection."""
@@ -76,7 +88,14 @@ class WebSocketServer:
                     # Close the WebSocket connection, which will trigger cleanup
                     await websocket.close()
             
-            openai_client = OpenAIRealtimeClient(self.openai_api_key, disconnect_callback=disconnect_client)
+            openai_client = OpenAIRealtimeClient(
+                self.openai_api_key, 
+                disconnect_callback=disconnect_client,
+                vad_threshold=self.vad_threshold,
+                vad_prefix_padding_ms=self.vad_prefix_padding_ms,
+                vad_silence_duration_ms=self.vad_silence_duration_ms,
+                instructions=self.instructions
+            )
             await asyncio.wait_for(openai_client.connect(), timeout=30.0)
             self.client_openai_clients[websocket] = openai_client
             logger.info(f"✅ OpenAI session created for client {client_addr}")
