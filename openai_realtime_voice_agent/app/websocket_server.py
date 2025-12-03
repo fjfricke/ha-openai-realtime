@@ -5,8 +5,8 @@ import logging
 from typing import Set, Optional
 import websockets
 from websockets.exceptions import ConnectionClosed
-from openai_client import OpenAIRealtimeClient
-from audio_recorder import AudioRecorder
+from app.openai_client import OpenAIRealtimeClient
+from app.audio_recorder import AudioRecorder
 
 logger = logging.getLogger(__name__)
 

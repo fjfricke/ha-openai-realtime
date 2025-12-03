@@ -246,6 +246,11 @@ void VoiceAssistantWebSocket::connect_websocket_() {
   websocket_cfg.buffer_size = 4096;
   websocket_cfg.task_prio = 5;
   websocket_cfg.task_stack = 8192;
+  websocket_cfg.transport = WEBSOCKET_TRANSPORT_OVER_TCP;  // Use TCP (not SSL) for ws://
+  websocket_cfg.network_timeout_ms = 30000;  // 30 second timeout for network operations
+  websocket_cfg.reconnect_timeout_ms = 10000;  // 10 second reconnect timeout
+  websocket_cfg.ping_interval_sec = 20;  // Send ping every 20 seconds (matches server)
+  websocket_cfg.pingpong_timeout_sec = 10;  // 10 second timeout for pong (matches server)
   
   this->websocket_client_ = esp_websocket_client_init(&websocket_cfg);
   if (this->websocket_client_ == nullptr) {
@@ -316,8 +321,6 @@ void VoiceAssistantWebSocket::send_audio_chunk_(const uint8_t *data, size_t len)
                                             portMAX_DELAY);
   if (sent < 0) {
     ESP_LOGW(TAG, "Failed to send audio chunk");
-  } else {
-    ESP_LOGD(TAG, "Sent %zu bytes of audio", len);
   }
 }
 
@@ -402,9 +405,6 @@ void VoiceAssistantWebSocket::process_received_audio_(const uint8_t *data, size_
     this->audio_queue_.push(remainder);
     ESP_LOGD(TAG, "Partially wrote %zu/%zu bytes, queued remainder (queue size: %zu/%zu)", 
              bytes_written, len, this->audio_queue_.size(), MAX_QUEUE_SIZE);
-  } else if (bytes_written > 0) {
-    ESP_LOGD(TAG, "Received %zu bytes (24kHz, 16-bit, mono), wrote %zu bytes to resampler (will convert to 48kHz)", 
-             len, bytes_written);
   }
 }
 
@@ -479,9 +479,6 @@ void VoiceAssistantWebSocket::on_microphone_data_(const std::vector<uint8_t> &da
   // - OpenAI's server_vad handles voice activity detection
   // - If user speaks, OpenAI will generate new audio, which resets the speaker timer
   this->send_audio_chunk_(reinterpret_cast<const uint8_t *>(resampled_24khz), resampled_bytes);
-  
-  ESP_LOGD(TAG, "Received %zu bytes from microphone (16kHz, 32-bit, stereo), converted to %zu bytes mono (16-bit, 16kHz), resampled to %zu bytes (24kHz) for server", 
-           data.size(), mono_16khz_samples * BYTES_PER_SAMPLE, resampled_bytes);
 }
 
 void VoiceAssistantWebSocket::websocket_event_handler_(void *handler_args, 
@@ -498,6 +495,10 @@ void VoiceAssistantWebSocket::websocket_event_handler_(void *handler_args,
 void VoiceAssistantWebSocket::handle_websocket_event_(esp_websocket_event_id_t event_id, 
                                                       esp_websocket_event_data_t *event_data) {
   switch (event_id) {
+    case WEBSOCKET_EVENT_BEFORE_CONNECT:
+      ESP_LOGI(TAG, "WebSocket connection attempt starting...");
+      break;
+      
     case WEBSOCKET_EVENT_CONNECTED:
       ESP_LOGI(TAG, "WebSocket connected");
       this->state_ = VOICE_ASSISTANT_WEBSOCKET_RUNNING;
@@ -564,7 +565,58 @@ void VoiceAssistantWebSocket::handle_websocket_event_(esp_websocket_event_id_t e
       break;
       
     case WEBSOCKET_EVENT_ERROR:
-      ESP_LOGE(TAG, "WebSocket error");
+      if (event_data != nullptr) {
+        // Log error information - note: error_handle may not be fully populated for all error types
+        int sock_errno = event_data->error_handle.esp_transport_sock_errno;
+        esp_err_t tls_err = event_data->error_handle.esp_tls_last_esp_err;
+        
+        ESP_LOGE(TAG, "WebSocket error - Type: %d, ESP-TLS Error: %s (0x%x), Socket errno: %d, Handshake Status: %d",
+                 event_data->error_handle.error_type,
+                 esp_err_to_name(tls_err),
+                 tls_err,
+                 sock_errno,
+                 event_data->error_handle.esp_ws_handshake_status_code);
+        
+        // Log specific error types
+        if (event_data->error_handle.error_type != WEBSOCKET_ERROR_TYPE_NONE) {
+          switch (event_data->error_handle.error_type) {
+            case WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT:
+              ESP_LOGE(TAG, "TCP transport error - check network connectivity and server address");
+              if (sock_errno == 119) {
+                ESP_LOGE(TAG, "Connection refused (errno 119) - check: 1) Server IP/port correct, 2) Same network subnet, 3) Firewall rules");
+              } else if (sock_errno != 0) {
+                ESP_LOGE(TAG, "Socket error (errno %d) - network connectivity issue", sock_errno);
+              }
+              break;
+            case WEBSOCKET_ERROR_TYPE_HANDSHAKE:
+              ESP_LOGE(TAG, "WebSocket handshake failed - Status code: %d", 
+                       event_data->error_handle.esp_ws_handshake_status_code);
+              break;
+            case WEBSOCKET_ERROR_TYPE_PONG_TIMEOUT:
+              ESP_LOGE(TAG, "Pong timeout - server not responding to ping");
+              break;
+            case WEBSOCKET_ERROR_TYPE_SERVER_CLOSE:
+              ESP_LOGE(TAG, "Server closed connection");
+              break;
+            default:
+              ESP_LOGE(TAG, "Unknown WebSocket error type: %d", event_data->error_handle.error_type);
+              break;
+          }
+        } else {
+          // Error type is NONE, but we still have error codes from ESP-IDF logs
+          if (sock_errno == 119) {
+            ESP_LOGE(TAG, "Connection refused (errno 119) - check: 1) Server IP/port correct, 2) Same network subnet, 3) Firewall rules");
+          } else if (tls_err != ESP_OK) {
+            ESP_LOGE(TAG, "Transport error: %s (0x%x)", 
+                     esp_err_to_name(tls_err),
+                     tls_err);
+          } else if (sock_errno != 0) {
+            ESP_LOGE(TAG, "Socket error (errno %d) - check network connectivity", sock_errno);
+          }
+        }
+      } else {
+        ESP_LOGE(TAG, "WebSocket error (no event data available)");
+      }
       this->state_ = VOICE_ASSISTANT_WEBSOCKET_ERROR;
       
       if (this->state_callback_) {

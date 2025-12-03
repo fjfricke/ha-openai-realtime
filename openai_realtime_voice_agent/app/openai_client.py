@@ -3,13 +3,14 @@ import json
 import asyncio
 import logging
 import base64
+import re
 from typing import Dict, Optional, Any, Callable, Awaitable
 from openai import OpenAI
 from openai.resources.realtime.realtime import RealtimeConnection
 from concurrent.futures import ThreadPoolExecutor
 from websockets.exceptions import ConnectionClosedOK, ConnectionClosed
-from disconnect_tool import get_disconnect_tool_definition, execute_disconnect_tool
-from home_assistant_mcp_client import get_home_assistant_client
+from app.disconnect_tool import get_disconnect_tool_definition, execute_disconnect_tool
+from app.home_assistant_mcp_client import get_home_assistant_client
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,8 @@ class OpenAIRealtimeClient:
         self._session_created = False
         # Track if we've received the first user message (to trigger response after create_response: False)
         self._first_user_message_received = False
+        # Track active response ID for cancellation
+        self._active_response_id: Optional[str] = None
         
         # Audio buffering configuration
         self._sample_rate = 24000  # 24kHz for OpenAI input
@@ -120,7 +123,7 @@ class OpenAIRealtimeClient:
                     },
                     "turn_detection": {
                         "type": "server_vad",
-                        "threshold": 0.25,
+                        "threshold": 0.5,
                         "prefix_padding_ms": 300,
                         "silence_duration_ms": 500,
                         "create_response": False,
@@ -270,6 +273,33 @@ class OpenAIRealtimeClient:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(self._executor, send_sync)
     
+    async def _create_response(self) -> None:
+        """
+        Create a new response, cancelling any active response first if needed.
+        This handles the case where a response is already in progress.
+        """
+        # If there's an active response, cancel it first
+        if self._active_response_id:
+            logger.info(f"🛑 Cancelling active response {self._active_response_id} before creating new one...")
+            try:
+                await self._send_message({
+                    "type": "response.cancel",
+                    "response_id": self._active_response_id
+                })
+                logger.info(f"✅ Cancelled response {self._active_response_id}")
+                # Clear the tracked response ID
+                self._active_response_id = None
+                # Small delay to ensure cancellation is processed
+                await asyncio.sleep(0.1)
+            except Exception as e:
+                logger.warning(f"⚠️ Error cancelling response: {e}")
+                # Continue anyway - try to create new response
+        
+        # Create the new response
+        await self._send_message({
+            "type": "response.create"
+        })
+    
     async def _receive_messages(self) -> None:
         """Receive and handle messages from OpenAI Realtime API."""
         if not self.connection:
@@ -374,6 +404,16 @@ class OpenAIRealtimeClient:
         elif msg_type == "response.created":
             # Reset interruption flag when new response starts
             self._interrupted = False
+            # Track the active response ID
+            self._active_response_id = message.get("response", {}).get("id") if isinstance(message.get("response"), dict) else message.get("response_id")
+            if self._active_response_id:
+                logger.debug(f"📝 Active response ID: {self._active_response_id}")
+        
+        elif msg_type == "response.done":
+            # Clear active response ID when response is done
+            if self._active_response_id:
+                logger.debug(f"✅ Response {self._active_response_id} completed")
+            self._active_response_id = None
         
         elif msg_type == "input_audio_buffer.speech_started":
             # Mark as interrupted if there's an active response
@@ -405,9 +445,7 @@ class OpenAIRealtimeClient:
                 logger.debug("🎤 User speech stopped, triggering response...")
             
             # Always trigger response after user stops speaking
-            await self._send_message({
-                "type": "response.create"
-            })
+            await self._create_response()
             logger.debug(f"✅ Triggered response after user speech stopped (AEC grace period: {self._aec_grace_period_seconds}s)")
         
         elif msg_type == "conversation.item.input_audio_transcription.completed":
@@ -461,9 +499,7 @@ class OpenAIRealtimeClient:
 
             # Trigger a response so the assistant confirms the tool usage verbally
             # This ensures the user gets feedback about what was done
-            await self._send_message({
-                "type": "response.create"
-            })
+            await self._create_response()
             logger.debug(f"✅ Triggered response after function call {function_name}")
         
         elif msg_type == "error":
@@ -471,6 +507,38 @@ class OpenAIRealtimeClient:
             error_msg = error.get("message", str(error))
             error_code = error.get("code", "unknown")
             logger.error(f"❌ OpenAI API error [{error_code}]: {error_msg}")
+            
+            # Handle conversation_already_has_active_response error
+            if error_code == "conversation_already_has_active_response":
+                # Extract response ID from error message if available
+                # Error message format: "Conversation already has an active response in progress: resp_XXX. Wait until..."
+                response_id = None
+                if "resp_" in error_msg:
+                    # Try to extract response ID from error message using regex
+                    match = re.search(r'resp_[A-Za-z0-9]+', error_msg)
+                    if match:
+                        response_id = match.group(0)
+                
+                # Use tracked response ID if available, otherwise use extracted one
+                active_id = self._active_response_id or response_id
+                
+                if active_id:
+                    logger.info(f"🛑 Cancelling active response {active_id} to start new one...")
+                    try:
+                        # Cancel the active response
+                        await self._send_message({
+                            "type": "response.cancel",
+                            "response_id": active_id
+                        })
+                        logger.info(f"✅ Cancelled response {active_id}")
+                        # Clear the tracked response ID
+                        self._active_response_id = None
+                        # Small delay to ensure cancellation is processed
+                        await asyncio.sleep(0.1)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Error cancelling response: {e}")
+                else:
+                    logger.warning("⚠️ No active response ID available to cancel")
         
         else:
             # Log unknown message types at debug level
@@ -544,6 +612,7 @@ class OpenAIRealtimeClient:
         self._session_created_event.clear()
         self._first_user_message_received = False
         self._last_speech_stopped_time = 0
+        self._active_response_id = None
         
         if self._receive_task:
             self._receive_task.cancel()

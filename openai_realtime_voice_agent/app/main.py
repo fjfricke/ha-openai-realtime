@@ -3,17 +3,18 @@ import os
 import sys
 import asyncio
 import logging
-import signal
 from typing import Optional
-from websocket_server import WebSocketServer
-from home_assistant_mcp_client import initialize_home_assistant_client, get_home_assistant_client
-
+from app.websocket_server import WebSocketServer
+from app.home_assistant_mcp_client import initialize_home_assistant_client
+import dotenv
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+dotenv.load_dotenv()
 
 
 class Application:
@@ -22,7 +23,6 @@ class Application:
     def __init__(self):
         """Initialize application."""
         self.websocket_server: Optional[WebSocketServer] = None
-        self._shutdown_event = asyncio.Event()
         
     async def initialize(self) -> None:
         """Initialize all components."""
@@ -35,15 +35,15 @@ class Application:
         
         # Initialize Home Assistant MCP Client
         try:
-            ha_access_token = os.environ.get("HA_ACCESS_TOKEN")
-            ha_url = os.environ.get("HA_MCP_URL", "http://supervisor/core/api/mcp")
-            
-            if ha_access_token:
+            supervisor_token = os.environ.get("LONGLIVED_TOKEN") or os.environ.get("SUPERVISOR_TOKEN")
+            logger.info(f"Supervisor token: {supervisor_token}")
+            ha_mcp_url = os.environ.get("HA_MCP_URL", "http://supervisor/core/api/mcp")
+            if supervisor_token:
                 logger.info("Loading Home Assistant MCP tools...")
-                await initialize_home_assistant_client(url=ha_url, access_token=ha_access_token)
+                await initialize_home_assistant_client(url=ha_mcp_url, access_token=supervisor_token)
                 logger.info("✅ Home Assistant MCP Client initialized")
             else:
-                logger.warning("⚠️ HA_ACCESS_TOKEN not set, skipping Home Assistant MCP integration")
+                logger.warning("⚠️ SUPERVISOR_TOKEN not set, skipping Home Assistant MCP integration")
         except Exception as e:
             logger.warning(f"⚠️ Failed to initialize Home Assistant MCP Client: {e}")
         
@@ -54,61 +54,23 @@ class Application:
         
         logger.info("Application initialized successfully")
     
-    async def shutdown(self) -> None:
-        """Shutdown all components."""
-        logger.info("Shutting down application...")
-        
-        if self.websocket_server:
-            try:
-                await self.websocket_server.stop()
-            except Exception as e:
-                logger.error(f"Error stopping WebSocket server: {e}")
-        
-        # Disconnect from Home Assistant MCP Server
-        ha_client = get_home_assistant_client()
-        if ha_client:
-            try:
-                logger.info("Disconnecting from Home Assistant MCP Server...")
-                await ha_client.disconnect()
-                logger.info("✅ Disconnected from Home Assistant MCP Server")
-            except Exception as e:
-                logger.error(f"Error disconnecting Home Assistant MCP Client: {e}")
-        
-        logger.info("Application shutdown complete")
-    
     async def run(self) -> None:
         """Run the application."""
-        try:
-            await self.initialize()
-            
-            # Wait for shutdown signal
-            await self._shutdown_event.wait()
-            
-        except KeyboardInterrupt:
-            logger.info("Received keyboard interrupt")
-        except Exception as e:
-            logger.error(f"Application error: {e}", exc_info=True)
-        finally:
-            await self.shutdown()
-
-
-def setup_signal_handlers(app: Application) -> None:
-    """Setup signal handlers for graceful shutdown."""
-    def signal_handler(signum, frame):
-        logger.info(f"Received signal {signum}")
-        app._shutdown_event.set()
-    
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+        await self.initialize()
+        
+        # Keep the server running - wait for the server to be closed
+        if self.websocket_server and self.websocket_server._server:
+            await self.websocket_server._server.wait_closed()
 
 
 async def main() -> None:
     """Main entry point."""
     app = Application()
-    setup_signal_handlers(app)
     
     try:
         await app.run()
+    except KeyboardInterrupt:
+        logger.info("Received keyboard interrupt")
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)

@@ -192,6 +192,7 @@
         let audioQueue = [];
         let isPlayingAudio = false;
         let audioQueueSource = null;
+        let audioBufferRemainder = null; // Buffer for odd-byte chunks
         
         // Stats
         let stats = {
@@ -201,8 +202,13 @@
         };
         
         const WS_URL = 'ws://localhost:8080';
-        const SAMPLE_RATE = 16000;
-        const OUTPUT_SAMPLE_RATE = 24000;
+        const SAMPLE_RATE = 24000;  // OpenAI expects 24kHz input
+        const OUTPUT_SAMPLE_RATE = 24000;  // OpenAI outputs 24kHz
+        
+        // Pre-buffer settings for smooth playback
+        const PRE_BUFFER_MS = 200; // Wait for 200ms of audio before starting playback
+        const BYTES_PER_MS = (OUTPUT_SAMPLE_RATE * 2) / 1000; // 24kHz * 2 bytes per sample / 1000ms = 48 bytes/ms
+        const PRE_BUFFER_BYTES = PRE_BUFFER_MS * BYTES_PER_MS; // ~9600 bytes for 200ms
         
         function log(message, type = 'info') {
             const logDiv = document.getElementById('log');
@@ -243,6 +249,9 @@
                 log('🔌 Connecting to WebSocket server...', 'info');
                 ws = new WebSocket(WS_URL);
                 
+                // Set binary type to arraybuffer for better performance
+                ws.binaryType = 'arraybuffer';
+                
                 ws.onopen = async () => {
                     log('✅ Connected to server', 'success');
                     updateStatus('🟢 Connected - Starting call...', 'connected');
@@ -264,7 +273,9 @@
                         updateStats();
                     } else if (event.data instanceof ArrayBuffer) {
                         stats.receivedBytes += event.data.byteLength;
-                        log(`🔊 Received audio (ArrayBuffer): ${event.data.byteLength} bytes`, 'audio');
+                        const samples = event.data.byteLength / 2; // 16-bit = 2 bytes per sample
+                        const durationMs = (samples / OUTPUT_SAMPLE_RATE) * 1000;
+                        log(`🔊 Received audio (ArrayBuffer): ${event.data.byteLength} bytes (${samples} samples, ~${durationMs.toFixed(1)}ms)`, 'audio');
                         playAudio(event.data);
                         updateStats();
                     } else if (typeof event.data === 'string') {
@@ -405,7 +416,7 @@
                         return;
                     }
                     
-                    // Resample if needed (AudioContext might be 48kHz, we need 16kHz)
+                    // Resample if needed (AudioContext might be 48kHz, we need 24kHz)
                     let processedData = inputData;
                     if (actualSampleRate !== SAMPLE_RATE) {
                         // Simple downsampling: take every Nth sample
@@ -449,7 +460,7 @@
                 isRecording = true;
                 updateStatus('📞 Call Active - Speak now!', 'recording');
                 log('🎤 Recording started - speak into your microphone!', 'success');
-                log(`📊 Processing audio at ${actualSampleRate}Hz, sending at ${SAMPLE_RATE}Hz`, 'info');
+                log(`📊 Processing audio at ${actualSampleRate}Hz, sending at ${SAMPLE_RATE}Hz (OpenAI expects 24kHz)`, 'info');
                 log('💡 If audio level stays at 0, check microphone permissions and try speaking louder', 'info');
                 
                 // Check if processor is called after a short delay
@@ -514,18 +525,57 @@
                 playbackContext.resume();
             }
             
-            // Add to queue
-            audioQueue.push(audioData);
+            // Handle odd-byte chunks by combining with remainder
+            let processedData = audioData;
+            if (audioBufferRemainder) {
+                // Combine remainder with new data
+                const combined = new Uint8Array(audioBufferRemainder.byteLength + audioData.byteLength);
+                combined.set(new Uint8Array(audioBufferRemainder), 0);
+                combined.set(new Uint8Array(audioData), audioBufferRemainder.byteLength);
+                processedData = combined.buffer;
+                audioBufferRemainder = null;
+            }
             
-            // Start playing if not already playing
+            // Check if processed data has odd number of bytes
+            if (processedData.byteLength % 2 !== 0) {
+                // Store the last byte for next chunk
+                const lastByte = new Uint8Array(processedData).slice(-1);
+                audioBufferRemainder = lastByte.buffer;
+                // Use all but the last byte
+                processedData = processedData.slice(0, processedData.byteLength - 1);
+            }
+            
+            // Only add to queue if we have valid data (even number of bytes)
+            if (processedData.byteLength > 0) {
+                audioQueue.push(processedData);
+            }
+            
+            // Calculate total buffered bytes
+            let totalBufferedBytes = 0;
+            for (let i = 0; i < audioQueue.length; i++) {
+                totalBufferedBytes += audioQueue[i].byteLength;
+            }
+            if (audioBufferRemainder) {
+                totalBufferedBytes += audioBufferRemainder.byteLength;
+            }
+            
+            // Start playing if not already playing AND we have enough pre-buffered data
             if (!isPlayingAudio) {
-                processAudioQueue();
+                if (totalBufferedBytes >= PRE_BUFFER_BYTES) {
+                    const bufferedMs = totalBufferedBytes / BYTES_PER_MS;
+                    log(`📦 Pre-buffer ready: ${bufferedMs.toFixed(1)}ms (${totalBufferedBytes} bytes), starting playback`, 'info');
+                    processAudioQueue();
+                } else {
+                    const bufferedMs = totalBufferedBytes / BYTES_PER_MS;
+                    log(`⏳ Buffering: ${bufferedMs.toFixed(1)}ms / ${PRE_BUFFER_MS}ms (${totalBufferedBytes} / ${PRE_BUFFER_BYTES} bytes)`, 'info');
+                }
             }
         }
         
         function clearAudioQueue() {
             // Clear the queue
             audioQueue = [];
+            audioBufferRemainder = null;
             
             // Stop current playback if any
             if (audioQueueSource) {
@@ -542,7 +592,7 @@
         }
         
         async function processAudioQueue() {
-            if (isPlayingAudio || audioQueue.length === 0) {
+            if (isPlayingAudio) {
                 return;
             }
             
@@ -551,41 +601,112 @@
             while (audioQueue.length > 0) {
                 const audioData = audioQueue.shift();
                 
-                const int16Data = new Int16Array(audioData);
-                const playbackSampleRate = playbackContext.sampleRate;
-                
-                // Convert Int16 to Float32
-                const float32Data = new Float32Array(int16Data.length);
-                for (let i = 0; i < int16Data.length; i++) {
-                    float32Data[i] = int16Data[i] / 32768.0;
+                if (!audioData || audioData.byteLength === 0) {
+                    log('⚠️ Skipping empty audio chunk', 'warning');
+                    continue;
                 }
                 
-                // Create buffer at OpenAI's output sample rate (24kHz)
-                // The browser will automatically resample to playbackSampleRate
-                const buffer = playbackContext.createBuffer(1, float32Data.length, OUTPUT_SAMPLE_RATE);
-                buffer.getChannelData(0).set(float32Data);
-                
-                // Create and play source
-                const source = playbackContext.createBufferSource();
-                source.buffer = buffer;
-                source.connect(playbackContext.destination);
-                audioQueueSource = source; // Store reference for potential interruption
-                
-                // Wait for this buffer to finish before playing next
-                await new Promise((resolve) => {
-                    source.onended = () => {
-                        audioQueueSource = null;
-                        resolve();
-                    };
-                    source.start();
-                });
-                
-                // Small delay between chunks to prevent gaps
-                await new Promise(resolve => setTimeout(resolve, 10));
+                try {
+                    // Ensure we have an even number of bytes
+                    if (audioData.byteLength % 2 !== 0) {
+                        log(`⚠️ Skipping chunk with odd byte count: ${audioData.byteLength} bytes`, 'warning');
+                        continue;
+                    }
+                    
+                    const int16Data = new Int16Array(audioData);
+                    const samples = int16Data.length;
+                    const durationMs = (samples / OUTPUT_SAMPLE_RATE) * 1000;
+                    
+                    log(`🎵 Playing audio chunk: ${samples} samples (~${durationMs.toFixed(1)}ms)`, 'audio');
+                    
+                    // Convert Int16 to Float32
+                    const float32Data = new Float32Array(int16Data.length);
+                    for (let i = 0; i < int16Data.length; i++) {
+                        // Normalize to [-1, 1]
+                        float32Data[i] = Math.max(-1, Math.min(1, int16Data[i] / 32768.0));
+                    }
+                    
+                    // Create buffer at OpenAI's output sample rate (24kHz)
+                    // The browser will automatically resample to playbackSampleRate (usually 48kHz)
+                    const buffer = playbackContext.createBuffer(1, float32Data.length, OUTPUT_SAMPLE_RATE);
+                    buffer.getChannelData(0).set(float32Data);
+                    
+                    // Create and play source
+                    const source = playbackContext.createBufferSource();
+                    source.buffer = buffer;
+                    source.connect(playbackContext.destination);
+                    audioQueueSource = source; // Store reference for potential interruption
+                    
+                    // Wait for this buffer to finish before playing next
+                    await new Promise((resolve, reject) => {
+                        let resolved = false;
+                        const timeout = setTimeout(() => {
+                            if (!resolved) {
+                                resolved = true;
+                                log(`⚠️ Audio chunk timeout after ${(durationMs + 100).toFixed(0)}ms`, 'warning');
+                                resolve();
+                            }
+                        }, durationMs + 100); // Add 100ms buffer
+                        
+                        source.onended = () => {
+                            if (!resolved) {
+                                resolved = true;
+                                clearTimeout(timeout);
+                                audioQueueSource = null;
+                                log(`✅ Audio chunk finished playing`, 'audio');
+                                resolve();
+                            }
+                        };
+                        
+                        source.onerror = (error) => {
+                            if (!resolved) {
+                                resolved = true;
+                                clearTimeout(timeout);
+                                log(`❌ Audio playback error: ${error}`, 'error');
+                                reject(error);
+                            }
+                        };
+                        
+                        try {
+                            source.start(0);
+                            log(`▶️ Started playing audio chunk`, 'audio');
+                        } catch (error) {
+                            if (!resolved) {
+                                resolved = true;
+                                clearTimeout(timeout);
+                                log(`❌ Error starting audio: ${error.message}`, 'error');
+                                reject(error);
+                            }
+                        }
+                    });
+                    
+                } catch (error) {
+                    log(`❌ Error processing audio chunk: ${error.message}`, 'error');
+                }
             }
             
             isPlayingAudio = false;
             audioQueueSource = null;
+            log(`🏁 Audio queue finished, waiting for more chunks...`, 'info');
+            
+            // If new chunks arrived while we were processing, check if we have enough buffer
+            if (audioQueue.length > 0) {
+                let totalBufferedBytes = 0;
+                for (let i = 0; i < audioQueue.length; i++) {
+                    totalBufferedBytes += audioQueue[i].byteLength;
+                }
+                if (audioBufferRemainder) {
+                    totalBufferedBytes += audioBufferRemainder.byteLength;
+                }
+                
+                if (totalBufferedBytes >= PRE_BUFFER_BYTES) {
+                    log(`📥 New chunks arrived with enough buffer, continuing playback...`, 'info');
+                    processAudioQueue();
+                } else {
+                    const bufferedMs = totalBufferedBytes / BYTES_PER_MS;
+                    log(`📥 New chunks arrived, but need more buffer: ${bufferedMs.toFixed(1)}ms / ${PRE_BUFFER_MS}ms`, 'info');
+                }
+            }
         }
         
         // Update stats every second

@@ -65,42 +65,99 @@ class HomeAssistantMCPClient:
             self._connected = True
             logger.info(f"✅ Connected to Home Assistant MCP Server ({len(self.tools)} tools available)")
             
+        except asyncio.CancelledError:
+            # Handle cancellation during connection (e.g., during shutdown)
+            logger.info("🛑 Connection cancelled during initialization")
+            self._connected = False
+            await self._cleanup_connection()
+            raise  # Re-raise CancelledError to propagate cancellation
         except Exception as e:
             logger.error(f"❌ Failed to connect to Home Assistant MCP Server: {e}", exc_info=True)
             self._connected = False
-            if self._receive_task:
-                try:
-                    self._receive_task.cancel()
-                    await self._receive_task
-                except Exception:
-                    pass
-                self._receive_task = None
-            if self._transport_context:
-                try:
-                    await self._transport_context.__aexit__(type(e), e, None)
-                except Exception as cleanup_error:
-                    logger.warning(f"⚠️ Error during cleanup: {cleanup_error}")
-                self._transport_context = None
+            await self._cleanup_connection(e)
             raise
     
-    async def disconnect(self) -> None:
-        """Disconnect from Home Assistant MCP Server."""
-        self._connected = False
-        
+    async def _cleanup_connection(self, exception: Optional[Exception] = None) -> None:
+        """Clean up connection resources."""
         if self._receive_task:
             try:
                 self._receive_task.cancel()
-                await self._receive_task
-            except asyncio.CancelledError:
+                try:
+                    await asyncio.wait_for(self._receive_task, timeout=1.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+                except Exception:
+                    pass
+            except Exception:
                 pass
-            except Exception as e:
-                logger.warning(f"⚠️ Error cancelling receive task: {e}")
             finally:
                 self._receive_task = None
         
         if self._transport_context:
             try:
-                await self._transport_context.__aexit__(None, None, None)
+                exc_type = type(exception) if exception else None
+                exc_val = exception if exception else None
+                await asyncio.wait_for(
+                    self._transport_context.__aexit__(exc_type, exc_val, None),
+                    timeout=2.0
+                )
+            except (asyncio.TimeoutError, RuntimeError) as e:
+                # Suppress expected errors during cleanup
+                logger.debug(f"⚠️ Transport cleanup error (suppressed): {type(e).__name__}")
+            except Exception as cleanup_error:
+                # Suppress all cleanup errors (including BaseExceptionGroup)
+                # Cleanup errors during shutdown are expected and should not propagate
+                error_type = type(cleanup_error).__name__
+                if error_type in ("BaseExceptionGroup", "RuntimeError"):
+                    logger.debug(f"⚠️ Transport cleanup error (suppressed): {error_type}")
+                else:
+                    logger.warning(f"⚠️ Error during transport cleanup: {cleanup_error}")
+            finally:
+                self._transport_context = None
+        
+        self.session = None
+    
+    async def disconnect(self) -> None:
+        """Disconnect from Home Assistant MCP Server."""
+        self._connected = False
+        
+        # Cancel receive task first
+        if self._receive_task:
+            try:
+                self._receive_task.cancel()
+                # Wait for task to complete with timeout
+                try:
+                    await asyncio.wait_for(self._receive_task, timeout=2.0)
+                except asyncio.TimeoutError:
+                    logger.warning("⚠️ Receive task did not cancel within timeout")
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    logger.warning(f"⚠️ Error cancelling receive task: {e}")
+            except Exception as e:
+                logger.warning(f"⚠️ Error during receive task cleanup: {e}")
+            finally:
+                self._receive_task = None
+        
+        # Close transport context with proper error handling
+        if self._transport_context:
+            try:
+                # Use a timeout to prevent hanging during shutdown
+                await asyncio.wait_for(
+                    self._transport_context.__aexit__(None, None, None),
+                    timeout=3.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("⚠️ Transport cleanup timed out, continuing shutdown")
+            except Exception as e:
+                # Suppress all cleanup errors during shutdown (including BaseExceptionGroup)
+                # Cleanup errors during shutdown are expected and should not propagate
+                error_type = type(e).__name__
+                if error_type in ("BaseExceptionGroup", "RuntimeError"):
+                    logger.debug(f"⚠️ Transport cleanup error (suppressed during shutdown): {error_type}")
+                else:
+                    # For other exceptions, log but don't raise (cleanup should be best-effort)
+                    logger.warning(f"⚠️ Transport cleanup error during shutdown: {e}")
             except Exception as e:
                 logger.warning(f"⚠️ Error closing transport: {e}")
             finally:
@@ -207,7 +264,7 @@ class HomeAssistantMCPClient:
 _home_assistant_client: Optional[HomeAssistantMCPClient] = None
 
 
-async def initialize_home_assistant_client(url: Optional[str] = None, access_token: Optional[str] = None) -> HomeAssistantMCPClient:
+async def initialize_home_assistant_client(url: str, access_token: str) -> HomeAssistantMCPClient:
     """
     Initialize and connect to Home Assistant MCP Server.
     
@@ -217,19 +274,20 @@ async def initialize_home_assistant_client(url: Optional[str] = None, access_tok
         
     Returns:
         Connected HomeAssistantMCPClient instance
+        
+    Raises:
+        asyncio.CancelledError: If connection is cancelled during initialization
+        Exception: Other connection errors
     """
     global _home_assistant_client
     
-    if url is None:
-        url = os.getenv('HA_MCP_URL', 'https://home.felixfricke.de/api/mcp')
-    
-    if access_token is None:
-        access_token = os.getenv('HA_ACCESS_TOKEN')
-        if not access_token:
-            raise ValueError("HA_ACCESS_TOKEN environment variable is required")
-    
     _home_assistant_client = HomeAssistantMCPClient(url, access_token)
-    await _home_assistant_client.connect()
+    try:
+        await _home_assistant_client.connect()
+    except asyncio.CancelledError:
+        # If cancelled, clean up and re-raise
+        _home_assistant_client = None
+        raise
     
     return _home_assistant_client
 

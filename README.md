@@ -59,28 +59,11 @@ See [`home-assistant-voice-pe/INSTALLATION.md`](home-assistant-voice-pe/INSTALLA
 - **Addon Documentation**: [`openai_realtime_voice_agent/README.md`](openai_realtime_voice_agent/README.md)
 - **Client Installation**: [`home-assistant-voice-pe/INSTALLATION.md`](home-assistant-voice-pe/INSTALLATION.md)
 - **Poetry Setup**: [`POETRY_SETUP.md`](POETRY_SETUP.md)
-- **Migration Guide**: [`MIGRATION_TO_POETRY.md`](MIGRATION_TO_POETRY.md)
+int
+## Issues
+
+For some reason, the endpoint at `http://supervisor/core/api/mcp` is not working (not even with `hassio_api: true` and `homeassistant_api: true`). So you have to create a longlived token and use it in the addon configuration, as well as set the home assistant mcp url to e.g. `http://homeassistant.local:8123/api/mcp`.
 
 ## License
 
 MIT
-
-## Third-Party Components and Licenses
-
-This project includes third-party components with their own licenses:
-
-### ESP WebSocket Client
-
-The ESPHome client component includes files from the **ESP WebSocket Client** library:
-
-- **Source**: https://github.com/espressif/esp-protocols
-- **Component**: `components/esp_websocket_client`
-- **License**: Apache License 2.0
-- **Copyright**: Copyright (c) 2015-2025 Espressif Systems (Shanghai) CO LTD
-- **Location**: `home-assistant-voice-pe/esphome/components/voice_assistant_websocket/esp_websocket_client.*` and `esp_websocket_client/` directory
-
-A copy of the Apache License 2.0 is included in `home-assistant-voice-pe/esphome/components/voice_assistant_websocket/esp_websocket_client/LICENSE`.
-
-For more details, see:
-- [`home-assistant-voice-pe/esphome/components/voice_assistant_websocket/README.md`](home-assistant-voice-pe/esphome/components/voice_assistant_websocket/README.md#third-party-components-and-licenses)
-- [`home-assistant-voice-pe/INSTALLATION.md`](home-assistant-voice-pe/INSTALLATION.md#third-party-components-and-licenses)
