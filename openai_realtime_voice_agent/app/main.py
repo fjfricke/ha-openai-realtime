@@ -15,9 +15,9 @@ from pipecat.frames.frames import Frame, InputAudioRawFrame, OutputAudioRawFrame
 
 from pipecat.transports.websocket.server import WebsocketServerTransport, WebsocketServerParams
 from app.mcp_service import HomeAssistantMCPService
-from app.recording_processor import AudioRecordingProcessor
 from app.raw_audio_serializer import RawAudioSerializer
 from app.disconnect_tool import get_disconnect_tool_definition, create_disconnect_tool_handler
+from app.audio_recording_service import AudioRecordingService
 
 # Configure logging
 logging.basicConfig(
@@ -71,6 +71,7 @@ class Application:
         self.websocket_transport: Optional[WebsocketServerTransport] = None
         self.openai_service: Optional[OpenAIRealtimeLLMService] = None
         self.mcp_service: Optional[HomeAssistantMCPService] = None
+        self.audio_recording_service: Optional[AudioRecordingService] = None
         self.session_last_activity: Optional[float] = None
         self.session_reuse_timeout: float = 300.0  # Default: 5 Minuten
         self.current_task: Optional[PipelineTask] = None
@@ -90,8 +91,8 @@ class Application:
         # Get instructions with default
         instructions = os.environ.get("INSTRUCTIONS", "You are the Home Assistant Voice Agent and can control the Smart Home.")
         
-        # Get recording setting
-        enable_recording = os.environ.get("ENABLE_RECORDING", "true").lower() == "true"
+        # Get recording setting (optional, defaults to false)
+        enable_recording = os.environ.get("ENABLE_RECORDING", "false").lower() == "true"
         
         # Get session reuse timeout
         session_reuse_timeout = float(os.environ.get("SESSION_REUSE_TIMEOUT_SECONDS", "300"))
@@ -154,26 +155,12 @@ class Application:
         # Note: Disconnect tool execution will be handled by OpenAI service
         # We'll need to set up a tool handler to intercept disconnect_client calls
         
-        # Create audio recording processors
-        # One for input (before OpenAI) and one for output (after OpenAI)
-        # Share the same recorder instance so both input and output are recorded to the same session files
-        shared_recorder = None
-        if enable_recording:
-            from app.audio_recorder import AudioRecorder
-            shared_recorder = AudioRecorder()
-            shared_recorder.start_recording(client_id="session")
-        
-        input_recording = AudioRecordingProcessor(
+        # Initialize audio recording service (optional)
+        self.audio_recording_service = AudioRecordingService(
             enable_recording=enable_recording,
-            client_id="session",
-            record_input=True,
-            shared_recorder=shared_recorder
-        )
-        output_recording = AudioRecordingProcessor(
-            enable_recording=enable_recording,
-            client_id="session",
-            record_input=False,
-            shared_recorder=shared_recorder
+            sample_rate=24000,
+            chunk_duration_seconds=30,
+            output_dir="recordings"
         )
         
         # Create activity trackers (one for input, one for output)
@@ -185,21 +172,32 @@ class Application:
         )
         
         # Build pipeline using official Pipecat WebSocket transport
-        # Flow: WebSocket Input -> Activity Tracker -> Input Recording -> OpenAI -> Output Recording -> Activity Tracker -> WebSocket Output
+        # Flow: WebSocket Input -> Activity Tracker -> OpenAI -> Activity Tracker -> WebSocket Output -> AudioBuffer
         if self.openai_service is None:
             raise RuntimeError("OpenAI service must be created before building pipeline")
         
         logger.info(f"🔗 Building pipeline with OpenAI service: {type(self.openai_service).__name__}")
-        self.pipeline = Pipeline([
+        
+        # Build pipeline components
+        pipeline_components = [
             self.websocket_transport.input(),  # Input: receives audio from clients
             input_activity_tracker,  # Track activity on input
-            input_recording,
             self.openai_service,
-            output_recording,
             output_activity_tracker,  # Track activity on output
             self.websocket_transport.output()  # Output: sends audio to clients
-        ])
+        ]
+        
+        # Add audio buffer processor after transport.output() if recording is enabled
+        audio_buffer = self.audio_recording_service.get_audio_buffer_processor() if self.audio_recording_service else None
+        if audio_buffer:
+            pipeline_components.append(audio_buffer)
+        
+        self.pipeline = Pipeline(pipeline_components)
         logger.info("✅ Pipeline erstellt")
+        
+        # Register transport event handlers for audio recording
+        if self.audio_recording_service:
+            self.audio_recording_service.register_transport_handlers(self.websocket_transport)
         
         # Create pipeline runner
         self.runner = PipelineRunner()

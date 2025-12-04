@@ -26,6 +26,8 @@ options:
   instructions: "You are the Home Assistant Voice Agent and can control the Smart Home."
   # Session management
   session_reuse_timeout_seconds: 300  # 5 Minuten (in Sekunden)
+  # Audio recording (optional, for debugging)
+  enable_recording: false
 schema:
   openai_api_key: password
   websocket_port: int(1024,65535)
@@ -36,6 +38,7 @@ schema:
   vad_silence_duration_ms: int
   instructions: str
   session_reuse_timeout_seconds: int(0,3600)  # bis 1 Stunde
+  enable_recording: bool
 #image: ghcr.io/yourusername/ha-openai-realtime/{arch}
 
 
