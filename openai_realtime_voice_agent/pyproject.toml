@@ -7,10 +7,11 @@ packages = [{include = "app", from = "."}]
 
 [tool.poetry.dependencies]
 python = ">=3.11,<3.14"
-pipecat-ai = {extras = ["mcp", "openai", "webrtc"], version = "*"}
+pipecat-ai = {extras = ["mcp", "openai", "websocket"], version = ">=0.0.96"}
 python-dotenv = ">=1.0.0"
 fastapi = ">=0.100.0"
 uvicorn = {extras = ["standard"], version = ">=0.23.0"}
+websockets = ">=13.0"
 
 [tool.poetry.scripts]
 start = "app.main:main"

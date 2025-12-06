@@ -4,8 +4,12 @@
 /.esphome/
 /secrets.yaml
 
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
 # Third-party components (downloaded via script)
 esphome/components/voice_assistant_websocket/esp_websocket_client.c
 esphome/components/voice_assistant_websocket/esp_websocket_client.h
 esphome/components/voice_assistant_websocket/esp_websocket_client/
-# Note: esp_webrtc and esp_afe_sr are now handled by ESPHome's add_idf_component()

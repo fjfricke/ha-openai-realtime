@@ -1,15 +1,54 @@
-"""Audio recording service using Pipecat's AudioBufferProcessor."""
+"""Audio recording service."""
 import logging
 from datetime import datetime
-from typing import Optional, TYPE_CHECKING
+from typing import Optional
 
-from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
+from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
+from pipecat.frames.frames import Frame, InputAudioRawFrame, OutputAudioRawFrame, StartFrame
 from app.audio_recorder import AudioRecorder
 
-if TYPE_CHECKING:
-    from pipecat.transports.websocket.server import WebsocketServerTransport
-
 logger = logging.getLogger(__name__)
+
+
+class AudioFrameRecorder(FrameProcessor):
+    """Processor that records specific audio frame types directly."""
+    
+    def __init__(self, frame_type, audio_recorder, record_func, **kwargs):
+        """
+        Initialize audio frame recorder.
+        
+        Args:
+            frame_type: Type of frame to record (InputAudioRawFrame or OutputAudioRawFrame)
+            audio_recorder: AudioRecorder instance
+            record_func: Function to call for recording (record_input_audio or record_output_audio)
+        """
+        super().__init__(**kwargs)
+        self.frame_type = frame_type
+        self.audio_recorder = audio_recorder
+        self.record_func = record_func
+    
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        # Handle StartFrame first to initialize the processor state
+        # This must be done before processing any other frames
+        if isinstance(frame, StartFrame):
+            # Call parent to mark processor as started
+            await super().process_frame(frame, direction)
+            # Push frame to next processor
+            await self.push_frame(frame, direction)
+            return
+        
+        # Always pass all frames through to the next processor first
+        await self.push_frame(frame, direction)
+        
+        # Then record if this is the right audio frame type
+        if isinstance(frame, self.frame_type) and self.audio_recorder:
+            try:
+                audio_bytes = frame.audio
+                if audio_bytes and len(audio_bytes) > 0:
+                    logger.debug(f"🎙️ Recording {len(audio_bytes)} bytes of {self.frame_type.__name__}")
+                    self.record_func(audio_bytes)
+            except Exception as e:
+                logger.warning(f"⚠️ Error recording audio: {e}")
 
 
 class AudioRecordingService:
@@ -36,8 +75,9 @@ class AudioRecordingService:
         self.chunk_duration_seconds = chunk_duration_seconds
         self.output_dir = output_dir
         
-        self.audio_buffer: Optional[AudioBufferProcessor] = None
         self.audio_recorder: Optional[AudioRecorder] = None
+        self.input_recorder: Optional[AudioFrameRecorder] = None
+        self.output_recorder: Optional[AudioFrameRecorder] = None
         
         if self.enable_recording:
             self._initialize_recording()
@@ -49,62 +89,60 @@ class AudioRecordingService:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.audio_recorder.start_recording(client_id=f"session_{timestamp}")
         
-        # Create AudioBufferProcessor for track-level recording (separate user and bot tracks)
-        # Use chunked recording for regular saves (recommended for most use cases)
-        buffer_size = self.sample_rate * 2 * self.chunk_duration_seconds  # 2 bytes per sample (16-bit)
-        
-        self.audio_buffer = AudioBufferProcessor(
-            sample_rate=self.sample_rate,
-            num_channels=1,  # Mono
-            buffer_size=buffer_size,
-            enable_turn_audio=False  # We want continuous recording, not turn-based
+        # Create audio frame recorders for input and output
+        self.input_recorder = AudioFrameRecorder(
+            InputAudioRawFrame,
+            self.audio_recorder,
+            self.audio_recorder.record_input_audio
         )
         
-        # Register event handler for track audio data (separate user and bot tracks)
-        @self.audio_buffer.event_handler("on_track_audio_data")
-        async def on_track_audio_data(buffer, user_audio, bot_audio, sample_rate, num_channels):
-            """Handle track audio data events from AudioBufferProcessor."""
-            if user_audio and len(user_audio) > 0:
-                self.audio_recorder.record_input_audio(user_audio)
-            if bot_audio and len(bot_audio) > 0:
-                self.audio_recorder.record_output_audio(bot_audio)
+        self.output_recorder = AudioFrameRecorder(
+            OutputAudioRawFrame,
+            self.audio_recorder,
+            self.audio_recorder.record_output_audio
+        )
         
         logger.info("✅ AudioRecordingService initialized")
     
-    def get_audio_buffer_processor(self) -> Optional[AudioBufferProcessor]:
-        """Get the audio buffer processor for pipeline integration."""
-        return self.audio_buffer if self.enable_recording else None
+    def get_input_recorder(self) -> Optional[AudioFrameRecorder]:
+        """Get the input audio recorder for pipeline integration."""
+        return self.input_recorder if self.enable_recording else None
     
-    def register_transport_handlers(self, transport: "WebsocketServerTransport"):
-        """
-        Register event handlers for the WebSocket transport.
-        
-        Args:
-            transport: The WebSocket transport instance
-        """
-        if not self.enable_recording or not self.audio_buffer:
+    def get_output_recorder(self) -> Optional[AudioFrameRecorder]:
+        """Get the output audio recorder for pipeline integration."""
+        return self.output_recorder if self.enable_recording else None
+    
+    def start_new_session(self, client_id: Optional[str] = None):
+        """Start a new recording session."""
+        if not self.enable_recording:
             return
         
-        @transport.event_handler("on_client_connected")
-        async def on_client_connected(transport, websocket):
-            """Start recording when client connects."""
-            logger.info("🎙️ Client connected - starting audio recording")
-            await self.audio_buffer.start_recording()
+        # Stop current recording if active
+        if self.audio_recorder:
+            self.audio_recorder.stop_recording()
         
-        @transport.event_handler("on_client_disconnected")
-        async def on_client_disconnected(transport, websocket):
-            """Stop recording when client disconnects."""
-            logger.info("🎙️ Client disconnected - stopping audio recording")
-            # Stop recording - this will trigger final audio data handlers
-            await self.audio_buffer.stop_recording()
-            if self.audio_recorder:
-                self.audio_recorder.stop_recording()
-                # Create new recorder for next session
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                self.audio_recorder = AudioRecorder(output_dir=self.output_dir)
-                self.audio_recorder.start_recording(client_id=f"session_{timestamp}")
+        # Create new recorder for this session
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_id = client_id or f"session_{timestamp}"
+        self.audio_recorder = AudioRecorder(output_dir=self.output_dir)
+        self.audio_recorder.start_recording(client_id=session_id)
         
-        logger.info("✅ Registered transport event handlers for audio recording")
+        # Update recorders with new audio_recorder instance
+        if self.input_recorder:
+            self.input_recorder.audio_recorder = self.audio_recorder
+            self.input_recorder.record_func = self.audio_recorder.record_input_audio
+        
+        if self.output_recorder:
+            self.output_recorder.audio_recorder = self.audio_recorder
+            self.output_recorder.record_func = self.audio_recorder.record_output_audio
+        
+        logger.info(f"🎙️ Started new recording session: {session_id}")
+    
+    def stop_recording(self):
+        """Stop current recording session."""
+        if self.audio_recorder:
+            self.audio_recorder.stop_recording()
+            logger.info("🎙️ Stopped recording session")
     
     def cleanup(self):
         """Cleanup resources."""

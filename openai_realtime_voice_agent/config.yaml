@@ -15,8 +15,7 @@ boot: auto
 host_network: true
 options:
   openai_api_key: ""
-  webrtc_port: 8080
-  stun_server: ""  # Optional STUN server for NAT traversal (e.g., "stun:stun.l.google.com:19302")
+  websocket_port: 8080
   ha_mcp_url: ""
   longlived_token: ""
   # Turn detection settings
@@ -31,8 +30,7 @@ options:
   enable_recording: false
 schema:
   openai_api_key: password
-  webrtc_port: int(1024,65535)
-  stun_server: str
+  websocket_port: int(1024,65535)
   ha_mcp_url: str
   longlived_token: password
   vad_threshold: float(0.0,1.0)

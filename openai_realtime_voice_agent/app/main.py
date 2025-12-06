@@ -9,20 +9,12 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineTask
 from pipecat.services.openai.realtime.llm import OpenAIRealtimeLLMService
-from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
-from pipecat.frames.frames import Frame, InputAudioRawFrame, OutputAudioRawFrame, StartFrame, EndFrame
-
-from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
-from pipecat.transports.smallwebrtc.connection import IceServer
-from pipecat.transports.smallwebrtc.request_handler import ConnectionMode
+from pipecat.transports.websocket.server import WebsocketServerTransport
 from app.mcp_service import HomeAssistantMCPService
 from app.disconnect_tool import get_disconnect_tool_definition, create_disconnect_tool_handler
 from app.audio_recording_service import AudioRecordingService
-from app.webrtc_service import WebRTCService
 from app.session_manager import SessionManager
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
+from app.websocket_handler import WebSocketHandler
 
 # Configure logging
 logging.basicConfig(
@@ -34,41 +26,9 @@ logger = logging.getLogger(__name__)
 # Reduce verbosity of noisy loggers
 logging.getLogger("aiortc").setLevel(logging.WARNING)
 logging.getLogger("websockets").setLevel(logging.WARNING)
-logging.getLogger("__main__").setLevel(logging.INFO)  # Reduce SessionActivityTracker debug logs
+logging.getLogger("__main__").setLevel(logging.INFO)
 
 dotenv.load_dotenv()
-
-
-class SessionActivityTracker(FrameProcessor):
-    """Processor that tracks session activity by monitoring audio frames."""
-    
-    def __init__(self, activity_callback, **kwargs):
-        super().__init__(**kwargs)
-        self.activity_callback = activity_callback
-    
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        # Log all frame types for debugging
-        if isinstance(frame, StartFrame):
-            logger.debug("🎬 SessionActivityTracker: Received StartFrame")
-            # Let parent handle StartFrame lifecycle first
-            await super().process_frame(frame, direction)
-            # Then push the frame through
-            await self.push_frame(frame, direction)
-            return
-        elif isinstance(frame, EndFrame):
-            logger.debug("🏁 SessionActivityTracker: Received EndFrame")
-            # Push EndFrame through
-            await self.push_frame(frame, direction)
-            return
-        
-        # Track activity on any audio frame
-        if isinstance(frame, (InputAudioRawFrame, OutputAudioRawFrame)):
-            if self.activity_callback:
-                self.activity_callback()
-            logger.debug(f"🎵 SessionActivityTracker: Processing {type(frame).__name__} ({len(frame.audio)} bytes)")
-        
-        # Pass frame through to next processor
-        await self.push_frame(frame, direction)
 
 
 class Application:
@@ -78,21 +38,21 @@ class Application:
         """Initialize application."""
         self.pipeline: Optional[Pipeline] = None
         self.runner: Optional[PipelineRunner] = None
-        self.webrtc_service: Optional[WebRTCService] = None
-        self.webrtc_transport: Optional[SmallWebRTCTransport] = None
+        self.websocket_handler: Optional[WebSocketHandler] = None
+        self.websocket_transport: Optional[WebsocketServerTransport] = None
         self.openai_service: Optional[OpenAIRealtimeLLMService] = None
         self.mcp_service: Optional[HomeAssistantMCPService] = None
         self.audio_recording_service: Optional[AudioRecordingService] = None
         self.session_manager: Optional[SessionManager] = None
         self.current_task: Optional[PipelineTask] = None
         self._pipeline_lock: Optional[asyncio.Lock] = None
-        self.fastapi_app: Optional[FastAPI] = None
         
     async def initialize(self) -> None:
         """Initialize all components."""
         # Get configuration from environment
         openai_api_key = os.environ.get("OPENAI_API_KEY")
-        webrtc_port = int(os.environ.get("WEBRTC_PORT", "8080"))
+        websocket_port = int(os.environ.get("WEBSOCKET_PORT", "8080"))
+        websocket_host = os.environ.get("WEBSOCKET_HOST", "0.0.0.0")
         
         # Get turn detection settings with defaults
         vad_threshold = float(os.environ.get("VAD_THRESHOLD", "0.5"))
@@ -128,101 +88,14 @@ class Application:
         except Exception as e:
             logger.warning(f"⚠️ Failed to initialize Home Assistant MCP Client: {e}")
         
-        # Initialize WebRTC service
-        logger.info("Initializing WebRTC transport...")
-        
-        # Get ICE servers from environment (optional, for NAT traversal)
-        ice_servers = None
-        stun_server = os.environ.get("STUN_SERVER")
-        if stun_server:
-            ice_servers = [IceServer(urls=[stun_server])]
-            logger.info(f"Using STUN server: {stun_server}")
-        
-        # Initialize WebRTC service
-        self.webrtc_service = WebRTCService(
-            ice_servers=ice_servers,
-            esp32_mode=True,  # Enable ESP32-specific SDP munging
-            host=None,
-            connection_mode=ConnectionMode.SINGLE  # Single connection mode
+        # Initialize WebSocket handler
+        self.websocket_handler = WebSocketHandler(
+            host=websocket_host,
+            port=websocket_port,
+            session_manager=self.session_manager,
+            audio_recording_service=self.audio_recording_service
         )
-        
-        # Create FastAPI app for WebRTC signaling
-        self.fastapi_app = FastAPI(title="OpenAI Realtime Voice Agent - WebRTC")
-        
-        # Add CORS middleware for browser clients
-        self.fastapi_app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],  # In production, specify allowed origins
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
-        
-        # Register WebRTC routes with connection callback
-        async def connection_callback(transport: SmallWebRTCTransport, client_ip: str):
-            """Handle new WebRTC connection.
-            
-            Args:
-                transport: The WebRTC transport instance
-                client_ip: The IP address of the client (used as client_id)
-            """
-            logger.info(f"🔗 New WebRTC connection established from IP: {client_ip}")
-            # Use IP address as client ID
-            client_id = client_ip
-            logger.info(f"✅ Using client_id (IP): {client_id}")
-            
-            # Ensure OpenAI service exists (will create new session)
-            await self._ensure_openai_service(client_id=client_id)
-            # Build pipeline for this transport
-            self._build_pipeline_for_transport(transport, client_id)
-        
-        # Store callback for use in routes
-        self._webrtc_connection_callback = connection_callback
-        
-        # Register FastAPI routes
-        self.webrtc_service.register_fastapi_routes(self.fastapi_app, base_path="/webrtc")
-        
-        # Override the offer handler to use our connection callback
-        from fastapi import HTTPException
-        from fastapi.responses import JSONResponse
-        from pipecat.transports.smallwebrtc.request_handler import SmallWebRTCRequest
-        
-        @self.fastapi_app.post("/webrtc/offer")
-        async def handle_offer(request_data: dict, http_request: Request):
-            """Handle WebRTC offer request."""
-            try:
-                # Extract client IP address for client identification
-                client_ip = http_request.client.host if http_request.client else None
-                if not client_ip:
-                    # Fallback: try to get from headers (for proxies)
-                    client_ip = http_request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-                    if not client_ip:
-                        client_ip = http_request.headers.get("X-Real-IP", "")
-                
-                if not client_ip:
-                    import uuid
-                    client_ip = f"unknown_{uuid.uuid4().hex[:8]}"
-                    logger.warning("⚠️ Could not extract client IP, using generated ID")
-                else:
-                    logger.info(f"✅ Extracted client IP: {client_ip}")
-                
-                request = SmallWebRTCRequest.from_dict(request_data)
-                
-                # Create a callback that passes client_ip to connection_callback
-                async def webrtc_callback(transport: SmallWebRTCTransport):
-                    await connection_callback(transport, client_ip)
-                
-                response = await self.webrtc_service.handle_webrtc_request(
-                    request,
-                    webrtc_callback
-                )
-                
-                return JSONResponse(content=response)
-            except Exception as e:
-                logger.error(f"❌ Error handling WebRTC offer: {e}", exc_info=True)
-                raise HTTPException(status_code=500, detail=str(e))
-        
-        logger.info(f"✅ WebRTC service initialized on port {webrtc_port}")
+        self.websocket_transport = self.websocket_handler.create_transport()
         
         # Store configuration for session creation
         self.openai_api_key = openai_api_key
@@ -232,9 +105,6 @@ class Application:
         self.instructions = instructions
         self.mcp_client = mcp_client
         
-        # Create initial OpenAI service
-        await self._ensure_openai_service()
-        
         # Initialize audio recording service (optional)
         self.audio_recording_service = AudioRecordingService(
             enable_recording=enable_recording,
@@ -243,86 +113,31 @@ class Application:
             output_dir="recordings"
         )
         
-        logger.info("✅ Application initialized - waiting for WebRTC connection")
+        logger.info("✅ Application initialized - ready to accept WebSocket connections")
     
-    def _build_pipeline_for_transport(self, transport: SmallWebRTCTransport, client_id: str):
+    def _build_pipeline_for_transport(self, transport: WebsocketServerTransport, client_id: str):
         """
-        Build pipeline for a WebRTC transport connection.
+        Build pipeline for a WebSocket transport connection.
         
         Args:
-            transport: The WebRTC transport instance
+            transport: The WebSocket transport instance
             client_id: Unique identifier for the client device
         """
-        self.webrtc_transport = transport
-        logger.info(f"🔗 Building pipeline for client: {client_id}")
-        
         # Ensure OpenAI service exists
         if self.openai_service is None:
             raise RuntimeError("OpenAI service must be created before building pipeline")
         
-        logger.info(f"🔗 Building pipeline with WebRTC transport and OpenAI service: {type(self.openai_service).__name__}")
-        
-        # Create activity trackers (one for input, one for output)
-        input_activity_tracker = SessionActivityTracker(
+        # Use WebSocket handler to build pipeline
+        self.pipeline, self.runner, self.current_task = self.websocket_handler.build_pipeline(
+            transport=transport,
+            openai_service=self.openai_service,
+            client_id=client_id,
             activity_callback=self._update_session_activity
         )
-        output_activity_tracker = SessionActivityTracker(
-            activity_callback=self._update_session_activity
-        )
-        
-        # Create context aggregator with cached context if available
-        context_aggregator = self.session_manager.create_context_aggregator(client_id)
-        
-        # Create context initializer if we have cached messages
-        context_initializer = self.session_manager.create_context_initializer(client_id, context_aggregator)
-        
-        # Build pipeline components
-        pipeline_components = [
-            transport.input(),
-            input_activity_tracker,
-            context_aggregator.user(),
-            self.openai_service,
-            context_aggregator.assistant(),
-            output_activity_tracker,
-            transport.output()
-        ]
-        
-        # Add context initializer if we have cached messages
-        if context_initializer:
-            pipeline_components.append(context_initializer)
-        
-        # Add audio buffer processor if recording is enabled
-        audio_buffer = self.audio_recording_service.get_audio_buffer_processor() if self.audio_recording_service else None
-        if audio_buffer:
-            pipeline_components.append(audio_buffer)
-        
-        self.pipeline = Pipeline(pipeline_components)
-        logger.info("✅ Pipeline erstellt für WebRTC connection")
-        
-        # Start audio recording if enabled
-        if self.audio_recording_service and audio_buffer:
-            asyncio.create_task(audio_buffer.start_recording())
-            logger.info("🎙️ Started audio recording for WebRTC connection")
-        
-        # Create pipeline runner and start it
-        self.runner = PipelineRunner()
-        self.current_task = PipelineTask(self.pipeline)
-        
-        # Start pipeline in background
-        asyncio.create_task(self.runner.run(self.current_task))
-        logger.info("✅ Pipeline started for WebRTC connection")
-        
-        # Register disconnect handler to cache context when client disconnects
-        @transport.event_handler("on_client_disconnected")
-        async def on_client_disconnected(*args, **kwargs):
-            """Handle client disconnection - cache context before cleanup."""
-            self.session_manager.handle_client_disconnect(client_id, self.openai_service)
-        
-        logger.info("✅ Application initialized successfully")
     
     def _update_session_activity(self):
         """Update session activity timestamp (called by SessionActivityTracker)."""
-        pass  # Placeholder for activity tracking if needed in the future
+        pass
     
     async def _ensure_openai_service(self, client_id: Optional[str] = None):
         """Create a new OpenAI service instance for a client.
@@ -334,18 +149,16 @@ class Application:
             self._pipeline_lock = asyncio.Lock()
         
         async with self._pipeline_lock:
-            # Client ID should always be provided when called from connection callback
             if client_id is None:
                 logger.warning("⚠️ No client_id provided to _ensure_openai_service")
             
-            # Create new session (each WebRTC connection gets a new session)
-            # Context is cached and reused by SessionManager
+            # Create new session
             if client_id:
-                logger.info(f"🆕 Erstelle neue OpenAI Session für Client {client_id}...")
+                logger.info(f"🆕 Creating new OpenAI Session for Client {client_id}...")
             else:
-                logger.info("🆕 Erstelle neue OpenAI Session...")
+                logger.info("🆕 Creating new OpenAI Session...")
             
-            # Cache context from old service before creating new one (if we have client_id)
+            # Cache context from old service before creating new one
             if client_id and self.openai_service is not None:
                 try:
                     self.session_manager.cleanup_before_new_session(client_id)
@@ -368,17 +181,15 @@ class Application:
             # Collect all tool definitions for session properties
             all_tools = [disconnect_tool_def]
             
-            # Get MCP tool definitions if available (BEFORE creating session)
-            # We need the tool definitions for SessionProperties, so we fetch them first
+            # Get MCP tool definitions if available
             mcp_tools_schema = None
             if self.mcp_client:
                 try:
                     logger.info("🔧 Fetching MCP tool definitions...")
                     mcp_tools_schema = await self.mcp_client.get_tools_schema()
                     
-                    # Convert MCP tool schemas to OpenAI format for SessionProperties
+                    # Convert MCP tool schemas to OpenAI format
                     for function_schema in mcp_tools_schema.standard_tools:
-                        # Convert FunctionSchema to OpenAI Realtime API format
                         openai_tool = {
                             "type": "function",
                             "name": function_schema.name,
@@ -397,7 +208,6 @@ class Application:
             
             session_properties = SessionProperties(
                 instructions=self.instructions,
-                # Configure audio input with VAD
                 audio=AudioConfiguration(
                     input=AudioInput(
                         turn_detection=TurnDetection(
@@ -409,7 +219,6 @@ class Application:
                     ),
                     output=AudioOutput(voice="marin")
                 ),
-                # Add all tools (disconnect + MCP tools) to session
                 tools=all_tools
             )
             
@@ -422,10 +231,10 @@ class Application:
                 session_properties=session_properties,
                 start_audio_paused=False
             )
-            logger.info(f"✅ OpenAI Service erstellt: {type(self.openai_service).__name__}")
+            logger.info(f"✅ OpenAI Service created: {type(self.openai_service).__name__}")
             
             # Register disconnect tool handler
-            disconnect_tool_handler = create_disconnect_tool_handler(self.webrtc_transport)
+            disconnect_tool_handler = create_disconnect_tool_handler(self.websocket_transport)
             self.openai_service.register_function("disconnect_client", disconnect_tool_handler)
             logger.info("✅ Registered disconnect tool handler")
             
@@ -437,30 +246,57 @@ class Application:
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to register MCP tool handlers: {e}")
             
-            # Register service with session manager (if we have client_id)
+            # Register service with session manager
             if client_id:
                 self.session_manager.set_current_service(client_id, self.openai_service)
             
-            logger.info("✅ Neue OpenAI Session erstellt")
+            logger.info("✅ New OpenAI Session created")
             return self.openai_service
     
     async def run(self) -> None:
         """Run the application."""
         await self.initialize()
         
-        # Get port from environment
-        webrtc_port = int(os.environ.get("WEBRTC_PORT", "8080"))
+        # Create initial OpenAI service (will be replaced per connection)
+        await self._ensure_openai_service()
+        
+        # Build pipeline - based on pipecat-examples, one pipeline handles all connections
+        # The transport manages multiple connections internally
+        self._build_pipeline_for_transport(self.websocket_transport, "server")
+        
+        # Setup WebSocket event handlers
+        async def on_client_connected(client_id: str):
+            """Handle new client connection."""
+            await self._ensure_openai_service(client_id=client_id)
+            if self.audio_recording_service:
+                self.audio_recording_service.start_new_session(client_id)
+        
+        def on_client_disconnected(client_id: str):
+            """Handle client disconnection."""
+            if self.session_manager:
+                self.session_manager.handle_client_disconnect(client_id, self.openai_service)
+            if self.audio_recording_service:
+                self.audio_recording_service.stop_recording()
+        
+        # Function to get OpenAI service for a client
+        def get_openai_service_for_client(client_id: str) -> Optional[OpenAIRealtimeLLMService]:
+            """Get OpenAI service for a specific client."""
+            if self.session_manager:
+                return self.session_manager.get_current_service(client_id)
+            return self.openai_service
+        
+        self.websocket_handler.setup_event_handlers(
+            transport=self.websocket_transport,
+            on_client_connected_callback=on_client_connected,
+            on_client_disconnected_callback=on_client_disconnected,
+            openai_service_getter=get_openai_service_for_client
+        )
         
         try:
-            # Start FastAPI server
-            config = uvicorn.Config(
-                app=self.fastapi_app,
-                host="0.0.0.0",
-                port=webrtc_port,
-                log_level="info"
-            )
-            server = uvicorn.Server(config)
-            await server.serve()
+            # Start the pipeline runner - this will start the WebSocket server
+            # Based on pipecat-examples: PipelineRunner.run() starts the transport server
+            logger.info("✅ Starting WebSocket server and pipeline...")
+            await self.runner.run(self.current_task)
         except KeyboardInterrupt:
             logger.info("Received keyboard interrupt")
         except Exception as e:
@@ -479,12 +315,11 @@ class Application:
             except Exception as e:
                 logger.warning(f"⚠️ Error cancelling runner: {e}")
         
-        if self.webrtc_transport:
+        if self.websocket_handler:
             try:
-                # WebRTC transport cleanup is handled by the connection
-                pass
+                await self.websocket_handler.cleanup()
             except Exception as e:
-                logger.warning(f"⚠️ Error stopping transport: {e}")
+                logger.warning(f"⚠️ Error cleaning up WebSocket handler: {e}")
         
         if self.audio_recording_service:
             self.audio_recording_service.cleanup()

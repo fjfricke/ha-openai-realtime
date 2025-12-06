@@ -22,7 +22,7 @@ class ContextCacheEntry:
 class SessionManager:
     """Manages OpenAI Realtime sessions with context caching per client device.
     
-    For each new WebRTC connection, a new session is created, but the context
+    For each new WebSocket connection, a new session is created, but the context
     from previous sessions for the same client is preserved if the last connection
     closed within the reuse timeout period.
     """
@@ -138,6 +138,17 @@ class SessionManager:
         else:
             logger.info(f"🆕 Creating new empty context for client {client_id}")
             return LLMContext()
+    
+    def get_current_service(self, client_id: str) -> Optional[OpenAIRealtimeLLMService]:
+        """Get current OpenAI service for a specific client.
+        
+        Args:
+            client_id: Unique identifier for the client device
+            
+        Returns:
+            Current OpenAIRealtimeLLMService if exists, None otherwise
+        """
+        return self.current_services.get(client_id)
     
     def set_current_service(self, client_id: str, service: OpenAIRealtimeLLMService):
         """Set the current active service for a client.

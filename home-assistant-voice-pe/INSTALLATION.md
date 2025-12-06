@@ -1,6 +1,6 @@
 # Installation Guide - Voice PE Hardware with OpenAI Realtime API
 
-This guide will help you set up the Home Assistant Voice PE hardware to work with the OpenAI Realtime API via WebRTC.
+This guide will help you set up the Home Assistant Voice PE hardware to work with the OpenAI Realtime API via WebSocket.
 
 ## Prerequisites
 
@@ -23,17 +23,7 @@ poetry install
 
 This will install ESPHome and all required dependencies.
 
-**Note:** The `voice_assistant_webrtc` component automatically downloads ESP-IDF WebRTC dependencies (`esp_webrtc` and `esp_afe_sr`) using ESPHome's built-in `add_idf_component()` function. No manual download is required.
-
-### 2. (Optional) Download ESP WebSocket Client Files
-
-If you're using the older `voice_assistant_websocket` component instead of WebRTC, you'll need to download ESP WebSocket Client files:
-
-```bash
-python3 download_websocket_client.py
-```
-
-**Note:** The WebRTC component (`voice_assistant_webrtc`) is recommended as it provides better audio quality and built-in AEC. The WebSocket component is only needed if you specifically require WebSocket connectivity.
+**Note:** The `voice_assistant_websocket` component automatically downloads ESP-IDF WebSocket client dependencies using ESPHome's built-in `add_idf_component()` function. No manual download is required.
 
 ### 3. Create Secrets File
 
@@ -48,7 +38,7 @@ Edit `secrets.yaml`:
 - `wifi_password`: Your WiFi password
 - `api_encryption_key`: Home Assistant API encryption key
 - `ota_password`: Password for OTA updates
-- `server_url`: Base URL for the OpenAI Realtime addon (format: `http://<IP>:<PORT>` for WebRTC)
+- `server_url`: WebSocket URL for the OpenAI Realtime addon (format: `ws://<IP>:<PORT>` or `wss://<IP>:<PORT>` for secure connections)
 
 **Example:**
 ```yaml
@@ -56,14 +46,14 @@ wifi_ssid: "MyWiFi"
 wifi_password: "MyPassword"
 api_encryption_key: "YourAPIKey"
 ota_password: "MyOTAPassword"
-server_url: "http://192.168.1.10:8080"  # Note: http:// not ws:// for WebRTC
+server_url: "ws://192.168.1.10:8080"  # Use ws:// for WebSocket or wss:// for secure WebSocket
 ```
 
-**Important:** For WebRTC, use `http://` or `https://` (not `ws://`). The WebRTC component uses HTTP for signaling and WebRTC for audio transport.
+**Important:** Use `ws://` for unencrypted WebSocket connections or `wss://` for secure WebSocket (TLS) connections.
 
 ### 4. Adjust Device Name (Optional)
 
-If desired, change the device name in `voice_pe_config.yaml`:
+If desired, change the device name in `voice_pe_config_websocket.yaml`:
 
 ```yaml
 esphome:
@@ -72,98 +62,74 @@ esphome:
 
 ### 5. Compile
 
-**Note:** The WebRTC component automatically downloads and includes all required ESP-IDF components during compilation. SRTP is disabled in the configuration (`CONFIG_MBEDTLS_SSL_DTLS_SRTP: "n"`) to avoid compatibility issues with ESP-IDF 5.5.1's mbedtls.
+**Note:** The WebSocket component automatically downloads and includes all required ESP-IDF components during compilation.
 
 ```bash
 # From the project directory
 cd /path/to/home-assistant-voice-pe
 
 # Compile
-poetry run esphome compile voice_pe_config.yaml
+poetry run esphome compile voice_pe_config_websocket.yaml
 
 # Or if ESPHome is globally installed
-esphome compile voice_pe_config.yaml
+esphome compile voice_pe_config_websocket.yaml
 ```
 
-If you encounter compilation errors about missing `esp_peer.h` or `esp_afe_sr.h`:
+If you encounter compilation errors about missing WebSocket client headers:
 1. Ensure ESPHome can download the IDF components (check internet connection)
 2. Check that ESPHome can access GitHub to download components
-3. Try cleaning and rebuilding: `esphome clean voice_pe_config.yaml && esphome compile voice_pe_config.yaml`
+3. Try cleaning and rebuilding: `esphome clean voice_pe_config_websocket.yaml && esphome compile voice_pe_config_websocket.yaml`
 
 ```bash
 # From the parent directory with Poetry
 cd /path/to/ha-openai-realtime
-poetry run esphome compile home-assistant-voice-pe/voice_pe_config.yaml
+poetry run esphome compile home-assistant-voice-pe/voice_pe_config_websocket.yaml
 
 # Or directly (if ESPHome is globally installed)
-esphome compile home-assistant-voice-pe/voice_pe_config.yaml
+esphome compile home-assistant-voice-pe/voice_pe_config_websocket.yaml
 ```
 
-### 7. Flash to Device
+### 6. Flash to Device
 
 **Option A: USB Connection**
 ```bash
-poetry run esphome upload home-assistant-voice-pe/voice_pe_config.yaml --device /dev/cu.usbmodem101
+poetry run esphome upload home-assistant-voice-pe/voice_pe_config_websocket.yaml --device /dev/cu.usbmodem101
 ```
 
 **Option B: OTA (Over-The-Air)**
 - After the first USB upload, you can do future updates over OTA
 - The device must be connected to Home Assistant
-- Use: `esphome upload home-assistant-voice-pe/voice_pe_config.yaml` (automatically selects OTA if available)
+- Use: `esphome upload home-assistant-voice-pe/voice_pe_config_websocket.yaml` (automatically selects OTA if available)
 
 ## Third-Party Components and Licenses
 
-### ESP-WebRTC Dependencies (esp_webrtc and esp_afe_sr)
+### ESP WebSocket Client
 
-These components are automatically downloaded by ESPHome during compilation using the `add_idf_component()` function. They are not included in the git repository.
-
-This project includes ESP-IDF components from Espressif Systems for WebRTC connectivity and audio processing:
-
-**esp_webrtc (ESP-WebRTC Solution):**
-- Source: https://github.com/espressif/esp-webrtc-solution
-- Version: v1.0.0
-- Component name: `esp_webrtc` (contains `esp_peer.h` header)
-- Purpose: WebRTC peer connection management
-- Automatically downloaded by ESPHome during compilation
-
-**esp_afe_sr (ESP-AFE Speech Recognition):**
-- Source: https://github.com/espressif/esp-sr
-- Version: v2.0.0
-- Purpose: Acoustic Echo Cancellation (AEC), Noise Suppression (NS), and Auto Gain Control (AGC)
-- Automatically downloaded by ESPHome during compilation
-
-**License:**
-Both components are licensed under the **Apache License 2.0** (or as specified in their respective LICENSE files).
-
-**Copyright:**
-Copyright (c) Espressif Systems (Shanghai) CO LTD
-
-**How They're Included:**
-These components are automatically downloaded and registered by ESPHome using the `add_idf_component()` function in the component's `__init__.py`. This is the recommended approach for ESP-IDF components in ESPHome (see [ESPHome PR #4000](https://github.com/esphome/esphome/pull/4000)).
-
-### ESP WebSocket Client (Optional - for WebSocket component)
-
-If using the older `voice_assistant_websocket` component, this project includes the **ESP WebSocket Client** library:
+The `voice_assistant_websocket` component automatically downloads the **ESP WebSocket Client** library during compilation using ESPHome's `add_idf_component()` function.
 
 **Source:**
 - Repository: https://github.com/espressif/esp-protocols
 - Component: `components/esp_websocket_client`
-- Location: `esphome/components/voice_assistant_websocket/esp_websocket_client.*`
+- Version: websocket-v1.6.0
+- Automatically downloaded by ESPHome during compilation
 
 **License:**
 Apache License 2.0
 
-**Note:** The WebRTC component is recommended over WebSocket for better audio quality and built-in AEC.
+**Copyright:**
+Copyright (c) Espressif Systems (Shanghai) CO LTD
+
+**How It's Included:**
+The component is automatically downloaded and registered by ESPHome using the `add_idf_component()` function in the component's `__init__.py`. This is the recommended approach for ESP-IDF components in ESPHome (see [ESPHome PR #4000](https://github.com/esphome/esphome/pull/4000)).
 
 ## Features
 
 ### 🎤 Voice Assistant with OpenAI Realtime API
 
-The device connects to your OpenAI Realtime API server via **WebRTC** for real-time voice interactions. WebRTC provides:
-- Better audio quality than WebSocket
-- Built-in Acoustic Echo Cancellation (AEC) via ESP-AFE
-- Lower latency audio streaming
-- More reliable connection handling
+The device connects to your OpenAI Realtime API server via **WebSocket** for real-time voice interactions. The WebSocket connection provides:
+- Real-time bidirectional audio streaming
+- Low latency communication
+- Reliable connection handling with automatic reconnection
 
 The assistant can:
 - Listen to your voice commands
@@ -257,32 +223,33 @@ Volume can be adjusted via the rotary encoder (dial) on the device or through Ho
 
 ### Compilation Errors
 
-**Error: "voice_assistant_webrtc component not found"**
+**Error: "voice_assistant_websocket component not found"**
 - Ensure the `esphome/components` directory is in the correct location
 - The `external_components` configuration should find the local component
-- Check that `voice_assistant_webrtc` directory exists in `esphome/components/`
+- Check that `voice_assistant_websocket` directory exists in `esphome/components/`
 
-**Error: "esp_peer.h: No such file or directory" or "esp_afe_sr.h: No such file or directory"**
+**Error: "esp_websocket_client.h: No such file or directory"**
 - Ensure ESPHome can automatically download IDF components (they're downloaded during compilation)
 - Verify that the component's `__init__.py` is calling `add_idf_component()` correctly
-- Try cleaning and rebuilding: `esphome clean voice_pe_config.yaml && esphome compile voice_pe_config.yaml`
+- Check your internet connection - ESPHome needs to download components from GitHub
+- Try cleaning and rebuilding: `esphome clean voice_pe_config_websocket.yaml && esphome compile voice_pe_config_websocket.yaml`
 
 **Error: "voice_kit component not found"**
 - This is normal on first compilation - ESPHome downloads the component automatically
 - Ensure you have an internet connection
 
 **Error: "Could not find file 'wake_sound.flac'"**
-- Ensure `wake_sound.flac` is in the same directory as `voice_pe_config.yaml`
+- Ensure `wake_sound.flac` is in the same directory as `voice_pe_config_websocket.yaml`
 - Or update the `wake_word_triggered_sound_file` substitution to point to the correct path
 
 ### Connection Issues
 
-**Device doesn't connect to WebRTC server:**
-1. Check that `server_url` in `secrets.yaml` is correct (use `http://` or `https://`, not `ws://`)
-2. Verify the OpenAI Realtime addon is running and supports WebRTC
-3. Check logs: `esphome logs home-assistant-voice-pe/voice_pe_config.yaml`
+**Device doesn't connect to WebSocket server:**
+1. Check that `server_url` in `secrets.yaml` is correct (use `ws://` or `wss://` for secure connections)
+2. Verify the OpenAI Realtime addon is running and supports WebSocket connections
+3. Check logs: `esphome logs home-assistant-voice-pe/voice_pe_config_websocket.yaml`
 4. Verify network connectivity between device and server
-5. For WebRTC, ensure the server supports HTTP signaling (Pipecat SmallWebRTC format)
+5. Ensure the server URL includes the correct WebSocket endpoint path (e.g., `/ws` or `/websocket`)
 
 **No audio:**
 - Check that the microphone isn't muted (hardware mute switch)
@@ -333,7 +300,7 @@ The OpenAI Realtime API server includes:
 ## Support
 
 For issues:
-1. Check ESPHome logs: `esphome logs home-assistant-voice-pe/voice_pe_config.yaml`
+1. Check ESPHome logs: `esphome logs home-assistant-voice-pe/voice_pe_config_websocket.yaml`
 2. Check Home Assistant logs (OpenAI Realtime Addon)
 3. Check network connectivity between device and server
 4. Verify all secrets are correctly configured
@@ -350,9 +317,8 @@ For issues:
 ### Software Components
 - **ESPHome 2025.11.0+** framework
 - **ESP-IDF** framework
-- **Custom `voice_assistant_webrtc` component** for WebRTC communication
-- **esp_peer** (ESP-WebRTC) for peer connection management
-- **esp_afe_sr** (ESP-AFE) for Acoustic Echo Cancellation, Noise Suppression, and AGC
+- **Custom `voice_assistant_websocket` component** for WebSocket communication
+- **esp_websocket_client** (ESP-Protocols) for WebSocket client functionality
 - **microWakeWord** for wake word detection
 - **ESPHome audio pipeline** for audio processing
 
@@ -360,10 +326,9 @@ For issues:
 1. Microphone → I2S (16kHz, 32-bit stereo)
 2. Voice Kit (hardware AEC, AGC processing)
 3. microWakeWord (wake word detection)
-4. ESP-AFE (software AEC, NS, AGC - additional processing)
-5. voice_assistant_webrtc (resample to 24kHz mono, send via WebRTC)
-6. Receive audio from WebRTC (24kHz, 16-bit mono)
-7. Resampler (24kHz → 48kHz)
-8. I2S Speaker (48kHz, 32-bit stereo)
+4. voice_assistant_websocket (resample to 24kHz mono, send via WebSocket)
+5. Receive audio from WebSocket (24kHz, 16-bit mono)
+6. Resampler (24kHz → 48kHz)
+7. I2S Speaker (48kHz, 32-bit stereo)
 
-**Note:** The component uses both hardware AEC (Voice Kit) and software AEC (ESP-AFE) for maximum echo cancellation effectiveness.
+**Note:** The component uses hardware AEC (Voice Kit) for echo cancellation. The XMOS XU316 chip provides hardware-based Acoustic Echo Cancellation and Auto Gain Control.

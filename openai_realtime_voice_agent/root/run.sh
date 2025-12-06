@@ -3,8 +3,7 @@ set -e
 
 # Get configuration
 OPENAI_API_KEY=$(bashio::config 'openai_api_key')
-WEBRTC_PORT=$(bashio::config 'webrtc_port')
-STUN_SERVER=$(bashio::config 'stun_server')
+WEBSOCKET_PORT=$(bashio::config 'websocket_port')
 HA_MCP_URL=$(bashio::config 'ha_mcp_url')
 LONGLIVED_TOKEN=$(bashio::config 'longlived_token')
 
@@ -30,13 +29,8 @@ fi
 
 # Export environment variables
 export OPENAI_API_KEY
-export WEBRTC_PORT
+export WEBSOCKET_PORT
 export LONGLIVED_TOKEN
-
-# Export STUN server if set
-if [ -n "$STUN_SERVER" ]; then
-    export STUN_SERVER
-fi
 
 # Export turn detection settings
 export VAD_THRESHOLD
