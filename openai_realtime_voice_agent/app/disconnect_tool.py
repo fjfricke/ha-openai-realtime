@@ -7,6 +7,7 @@ from typing import Dict, Any, Callable, Awaitable, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from pipecat.services.llm_service import FunctionCallParams
     from pipecat.transports.websocket.server import WebsocketServerTransport
+    from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 
 logger = logging.getLogger(__name__)
 
@@ -74,26 +75,40 @@ async def execute_disconnect_tool(
 
 
 def create_disconnect_callback(
-    websocket_transport: Optional["WebsocketServerTransport"],
+    transport: Optional["WebsocketServerTransport"] | Optional["SmallWebRTCTransport"],
     reason: str = "user_requested"
 ) -> Callable[[], Awaitable[None]]:
     """
-    Create a disconnect callback that closes the WebSocket connection.
+    Create a disconnect callback that closes the connection.
     
     Args:
-        websocket_transport: The WebSocket transport instance
+        transport: The transport instance (WebSocket or WebRTC)
         reason: The reason for disconnecting
         
     Returns:
-        Async callback function that closes the WebSocket connection
+        Async callback function that closes the connection
     """
     async def disconnect_callback() -> None:
-        """Disconnect callback that closes the WebSocket connection."""
-        logger.info("🔌 Disconnect tool triggered - closing WebSocket connection")
+        """Disconnect callback that closes the connection."""
+        logger.info("🔌 Disconnect tool triggered - closing connection")
         try:
-            # Access the input transport's websocket connection
-            if websocket_transport and hasattr(websocket_transport, 'input'):
-                input_transport = websocket_transport.input()
+            if transport is None:
+                logger.warning("⚠️ No transport available for disconnect")
+                return
+            
+            # Handle WebRTC transport
+            if hasattr(transport, 'webrtc_connection') or hasattr(transport, '_client'):
+                # WebRTC transport - disconnect the peer connection
+                if hasattr(transport, '_client') and hasattr(transport._client, '_connection'):
+                    connection = transport._client._connection
+                    if connection:
+                        await connection.disconnect()
+                        logger.info("✅ Closed WebRTC connection")
+                else:
+                    logger.warning("⚠️ Could not find WebRTC connection to close")
+            # Handle WebSocket transport (legacy)
+            elif hasattr(transport, 'input'):
+                input_transport = transport.input()
                 if hasattr(input_transport, '_websocket') and input_transport._websocket:
                     # Send disconnect message to client before closing
                     try:
@@ -111,19 +126,19 @@ def create_disconnect_callback(
                     await input_transport._websocket.close()
                     logger.info("✅ Closed WebSocket connection")
         except Exception as e:
-            logger.error(f"❌ Error closing WebSocket connection: {e}", exc_info=True)
+            logger.error(f"❌ Error closing connection: {e}", exc_info=True)
     
     return disconnect_callback
 
 
 def create_disconnect_tool_handler(
-    websocket_transport: Optional["WebsocketServerTransport"]
+    transport: Optional["WebsocketServerTransport"] | Optional["SmallWebRTCTransport"]
 ) -> Callable[["FunctionCallParams"], Awaitable[None]]:
     """
     Create a disconnect tool handler for Pipecat's OpenAI Realtime Service.
     
     Args:
-        websocket_transport: The WebSocket transport instance
+        transport: The transport instance (WebSocket or WebRTC)
         
     Returns:
         Async function handler that can be registered with OpenAIRealtimeLLMService
@@ -135,8 +150,8 @@ def create_disconnect_tool_handler(
         # Get reason from arguments
         reason = params.arguments.get("reason", "user_requested")
         
-        # Create disconnect callback that closes the WebSocket connection
-        disconnect_callback = create_disconnect_callback(websocket_transport, reason=reason)
+        # Create disconnect callback that closes the connection
+        disconnect_callback = create_disconnect_callback(transport, reason=reason)
         
         # Execute the disconnect tool
         result = await execute_disconnect_tool(params.arguments, disconnect_callback)
