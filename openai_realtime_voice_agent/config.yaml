@@ -36,4 +36,4 @@ schema:
   instructions: str
   session_reuse_timeout_seconds: int(0,3600)  # bis 1 Stunde
   enable_recording: bool
-image: ghcr.io/fjfricke/ha-openai-realtime/openai-realtime-voice-agent/{arch}
+image: ghcr.io/fjfricke/ha-openai-realtime/openai-realtime-voice-agent-{arch}

@@ -84,9 +84,9 @@ jobs:
           platforms: ${{ steps.arch-map.outputs.platform }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.arch }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.arch }}-${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.arch }}:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.arch }}:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.arch }}:${{ steps.version.outputs.version }}-${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.arch }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
@@ -95,43 +95,4 @@ jobs:
       - name: Generate image manifest
         if: github.event_name != 'pull_request' && matrix.arch == 'amd64'
         run: |
-          echo "Image built: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.arch }}"
-          echo "Version tag: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.arch }}:${{ steps.version.outputs.version }}"
-
-  manifest:
-    name: Create multi-arch manifest
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.event_name != 'pull_request'
-    permissions:
-      contents: read
-      packages: write
-    
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Extract version from config.yaml
-        id: version
-        run: |
-          VERSION=$(grep '^version:' openai_realtime_voice_agent/config.yaml | sed 's/version: "\(.*\)"/\1/')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create and push manifest
-        run: |
-          docker buildx imagetools create \
-            --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:aarch64 \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:amd64 \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:aarch64:${{ steps.version.outputs.version }} \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:amd64:${{ steps.version.outputs.version }}
+          echo "Image built: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.arch }}:${{ steps.version.outputs.version }}"
