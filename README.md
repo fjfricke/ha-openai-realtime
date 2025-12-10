@@ -1,69 +1,33 @@
 # OpenAI Realtime Voice Agent
 
-This repository contains both the Home Assistant addon and the ESPHome client configuration for the OpenAI Realtime Voice Agent system.
-
-## Repository Structure
-
-```
-.
-├── openai_realtime_voice_agent/    # Home Assistant Addon
-│   ├── config.yaml                # Addon configuration
-│   ├── Dockerfile                 # Container build instructions
-│   ├── pyproject.toml             # Python dependencies
-│   ├── app/                       # Application code
-│   ├── root/                      # Addon runtime files
-│   └── README.md                  # Addon documentation
-│
-└── home-assistant-voice-pe/       # ESPHome Client Configuration
-    ├── voice_pe_config.yaml       # Main ESPHome config for Voice PE hardware
-    ├── esphome_config_ha_voice_improved.yaml.example  # Example config
-    ├── esphome/                   # Custom ESPHome components
-    ├── secrets.yaml.example       # Secrets template
-    └── INSTALLATION.md            # Client installation guide
-```
+Voice control system for Home Assistant using OpenAI Realtime API with ESP32/ESP32-S3 devices.
 
 ## Components
 
-### Home Assistant Addon (`openai_realtime_voice_agent/`)
+This repository contains two main components:
 
-The server-side addon that runs in Home Assistant and provides:
-- OpenAI Realtime API integration
-- WebSocket server for ESP32 devices
-- Home Assistant MCP integration for device control
-
-See [`openai_realtime_voice_agent/README.md`](openai_realtime_voice_agent/README.md) for installation and configuration.
-
-### ESPHome Client (`home-assistant-voice-pe/`)
-
-The client-side configuration for ESP32/ESP32-S3 devices, including:
-- Custom `voice_assistant_websocket` component
-- Configuration for Home Assistant Voice PE hardware
-- Example configurations for other ESP32 devices
-
-See [`home-assistant-voice-pe/INSTALLATION.md`](home-assistant-voice-pe/INSTALLATION.md) for client setup.
-
-## Quick Start
-
-1. **Install the Addon**:
-   - Copy `openai_realtime_voice_agent/` to your Home Assistant `addons/` directory
-   - Or add this repository as an addon repository
-   - Configure and start the addon
-
-2. **Configure ESP32 Device**:
-   - Copy the custom component from `home-assistant-voice-pe/esphome/components/` to your ESPHome custom components
-   - Use `voice_pe_config.yaml` or the example config as a starting point
-   - Flash to your ESP32 device
+- **Server** (`openai_realtime_voice_agent/`): Home Assistant addon that provides OpenAI Realtime API integration and WebSocket server for ESP32 devices
+- **Client** (`home-assistant-voice-pe/`): ESPHome configuration for ESP32/ESP32-S3 devices with custom WebSocket component
 
 ## Documentation
 
-- **Addon Documentation**: [`openai_realtime_voice_agent/README.md`](openai_realtime_voice_agent/README.md)
-- **Client Installation**: [`home-assistant-voice-pe/INSTALLATION.md`](home-assistant-voice-pe/INSTALLATION.md)
-- **Poetry Setup**: [`POETRY_SETUP.md`](POETRY_SETUP.md)
-int
-## Issues
+- **Server Installation**: See [`openai_realtime_voice_agent/README.md`](openai_realtime_voice_agent/README.md)
+- **Client Installation**: See [`home-assistant-voice-pe/README.md`](home-assistant-voice-pe/README.md)
 
-For some reason, the endpoint at `http://supervisor/core/api/mcp` is not working (not even with `hassio_api: true` and `homeassistant_api: true`). So you have to create a longlived token and use it in the addon configuration, as well as set the home assistant mcp url to e.g. `http://homeassistant.local:8123/api/mcp`.
+## Quick Start
+
+1. **Install the Server Addon**: Follow the [server documentation](openai_realtime_voice_agent/README.md)
+2. **Configure ESP32 Device**: Follow the [client documentation](home-assistant-voice-pe/README.md)
+
+## Known Issues
+
+The endpoint `http://supervisor/core/api/mcp` is not working. You need to:
+- Create a long-lived token in Home Assistant
+- Use it in the addon configuration
+- Set the Home Assistant MCP URL to `http://localhost:8123/api/mcp` (or your Home Assistant URL). The MCP Server needs to be enabled in Home Assistant.
 
 ## License
 
-MIT
+MIT License - see [LICENSE](LICENSE) file for details.
+
+**Note**: This project uses [Pipecat](https://github.com/pipecat-ai/pipecat) which is licensed under BSD 2-Clause License. See the Pipecat repository for license details.

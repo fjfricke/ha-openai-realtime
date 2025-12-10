@@ -7,6 +7,10 @@
 #include <algorithm>
 #include <queue>
 
+#ifdef USE_ESP_IDF
+#include "esp_system.h"
+#endif
+
 static const char *TAG = "voice_assistant_websocket";
 
 namespace esphome {
@@ -17,6 +21,7 @@ void VoiceAssistantWebSocket::setup() {
   this->input_buffer_.reserve(INPUT_BUFFER_SIZE);
   this->output_buffer_.reserve(4096);  // Reserve space for output buffer
   this->mono_buffer_.reserve(INPUT_BUFFER_SIZE / 2);  // Reserve for mono conversion (input)
+  this->resampled_buffer_.reserve(INPUT_BUFFER_SIZE * 3 / 2); // 1.5x upsampling for 16kHz -> 24kHz
   this->output_stereo_buffer_.reserve(4096 * 2);  // Reserve for output processing (24kHz mono -> 48kHz stereo)
   this->state_ = VOICE_ASSISTANT_WEBSOCKET_IDLE;
   
@@ -131,7 +136,7 @@ void VoiceAssistantWebSocket::dump_config() {
   ESP_LOGCONFIG(TAG, "  Output Sample Rate: %u Hz", OUTPUT_SAMPLE_RATE);
   ESP_LOGCONFIG(TAG, "  Microphone: %s", this->microphone_ ? "Yes" : "No");
   ESP_LOGCONFIG(TAG, "  Speaker: %s", this->speaker_ ? "Yes" : "No");
-  ESP_LOGCONFIG(TAG, "  Max Queue Size: %zu chunks (~%u seconds)", MAX_QUEUE_SIZE, MAX_QUEUE_DURATION_SECONDS);
+  ESP_LOGCONFIG(TAG, "  Max Queue Size: %zu chunks", MAX_QUEUE_SIZE);
 }
 
 void VoiceAssistantWebSocket::start() {
@@ -148,6 +153,9 @@ void VoiceAssistantWebSocket::start() {
   
   // Reset explicit disconnect flag for new session
   this->explicit_disconnect_ = false;
+  
+  // Reset interrupt time
+  this->interrupt_time_ = 0;
   
   // Start microphone first (if not already running)
   // Note: micro_wake_word also uses this microphone, so it might already be running
@@ -339,6 +347,20 @@ void VoiceAssistantWebSocket::process_received_audio_(const uint8_t *data, size_
     return;
   }
   
+  // Ignore audio for a short period after interrupt to allow server to process it
+  if (this->interrupt_time_ > 0) {
+    uint32_t time_since_interrupt = millis() - this->interrupt_time_;
+    if (time_since_interrupt < INTERRUPT_IGNORE_AUDIO_MS) {
+      ESP_LOGD(TAG, "Ignoring audio after interrupt (%u ms remaining)", 
+               INTERRUPT_IGNORE_AUDIO_MS - time_since_interrupt);
+      return;  // Drop audio packets for a short time after interrupt
+    } else {
+      // Reset interrupt time after ignore period
+      this->interrupt_time_ = 0;
+      ESP_LOGI(TAG, "Resuming audio processing after interrupt");
+    }
+  }
+  
   // OpenAI sends 24kHz, 16-bit, mono PCM
   // The resampler is configured for 48kHz output and will automatically convert 24kHz -> 48kHz
   // We set audio_stream_info to 24kHz in start(), so the resampler knows the input sample rate
@@ -363,6 +385,15 @@ void VoiceAssistantWebSocket::process_received_audio_(const uint8_t *data, size_
     } else if (queued_written > 0) {
       // Partially sent - remove sent portion and keep remainder
       if (queued_written < queued_data.size()) {
+        // Check heap before creating remainder vector
+#ifdef USE_ESP_IDF
+        size_t free_heap = esp_get_free_heap_size();
+        if (free_heap < MIN_FREE_HEAP_BYTES) {
+          ESP_LOGW(TAG, "Low heap (%zu bytes), dropping remainder instead of queuing", free_heap);
+          this->audio_queue_.pop();
+          break;  // Drop remainder to preserve memory
+        }
+#endif
         std::vector<uint8_t> remainder(queued_data.begin() + queued_written, queued_data.end());
         this->audio_queue_.pop();
         this->audio_queue_.push(remainder);
@@ -377,7 +408,7 @@ void VoiceAssistantWebSocket::process_received_audio_(const uint8_t *data, size_
     }
   }
   
-  // Update last speaker audio time for auto-stop tracking
+  // Update last speaker audio time for auto-stop tracking and bot speaking detection
   this->last_speaker_audio_time_ = millis();
   
   // Send new audio data
@@ -385,22 +416,39 @@ void VoiceAssistantWebSocket::process_received_audio_(const uint8_t *data, size_
   
   if (bytes_written == 0 && len > 0) {
     // Speaker buffer is full - queue the data for later
-    // Server sends at playback rate, so queue should stay small
-    if (this->audio_queue_.size() >= MAX_QUEUE_SIZE) {
-      ESP_LOGW(TAG, "Audio queue at max size (%zu/%zu), waiting for playback to catch up", 
-               this->audio_queue_.size(), MAX_QUEUE_SIZE);
-      // Don't drop - wait for loop() to process the queue
+    // Check heap and queue size before attempting to queue
+#ifdef USE_ESP_IDF
+    size_t free_heap = esp_get_free_heap_size();
+    if (free_heap < MIN_FREE_HEAP_BYTES) {
+      ESP_LOGW(TAG, "Low heap (%zu bytes), dropping audio chunk (%zu bytes)", free_heap, len);
+      return;  // Drop audio to preserve memory
     }
+#endif
+    if (this->audio_queue_.size() >= MAX_QUEUE_SIZE) {
+      ESP_LOGW(TAG, "Audio queue at max size (%zu/%zu), dropping audio to prevent memory overflow", 
+               this->audio_queue_.size(), MAX_QUEUE_SIZE);
+      return;  // Drop audio instead of causing memory overflow
+    }
+    // Try to create vector - if allocation fails, it will crash, but we've checked heap above
     std::vector<uint8_t> queued_chunk(data, data + len);
     this->audio_queue_.push(queued_chunk);
     ESP_LOGD(TAG, "Speaker buffer full, queued %zu bytes (queue size: %zu/%zu)", 
              len, this->audio_queue_.size(), MAX_QUEUE_SIZE);
   } else if (bytes_written < len) {
     // Partially written - queue the remainder
-    if (this->audio_queue_.size() >= MAX_QUEUE_SIZE) {
-      ESP_LOGW(TAG, "Audio queue at max size (%zu/%zu), waiting for playback to catch up", 
-               this->audio_queue_.size(), MAX_QUEUE_SIZE);
+#ifdef USE_ESP_IDF
+    size_t free_heap = esp_get_free_heap_size();
+    if (free_heap < MIN_FREE_HEAP_BYTES) {
+      ESP_LOGW(TAG, "Low heap (%zu bytes), dropping remainder (%zu bytes)", free_heap, len - bytes_written);
+      return;  // Drop remainder to preserve memory
     }
+#endif
+    if (this->audio_queue_.size() >= MAX_QUEUE_SIZE) {
+      ESP_LOGW(TAG, "Audio queue at max size (%zu/%zu), dropping remainder to prevent memory overflow", 
+               this->audio_queue_.size(), MAX_QUEUE_SIZE);
+      return;  // Drop remainder instead of causing memory overflow
+    }
+    // Try to create vector - if allocation fails, it will crash, but we've checked heap above
     std::vector<uint8_t> remainder(data + bytes_written, data + len);
     this->audio_queue_.push(remainder);
     ESP_LOGD(TAG, "Partially wrote %zu/%zu bytes, queued remainder (queue size: %zu/%zu)", 
@@ -414,11 +462,14 @@ void VoiceAssistantWebSocket::on_microphone_data_(const std::vector<uint8_t> &da
     return;
   }
   
+  // Block microphone audio if bot is currently speaking
+  if (this->is_bot_speaking()) {
+    return;  // Don't send microphone audio while bot is speaking
+  }
+  
   // Microphone is configured for 16kHz, 32-bit, stereo (required by micro_wake_word)
   // OpenAI expects 24kHz, 16-bit, mono (non-beta API requirement)
   // Convert: 32-bit stereo -> 16-bit mono (16kHz) -> resample to 24kHz
-  // Take left channel (channel 0) - micro_wake_word uses channel 0 (left)
-  // 32-bit samples are stored as int32_t (4 bytes per sample)
   
   size_t stereo_32bit_samples = data.size() / (4 * 2);  // 4 bytes per 32-bit sample, 2 channels
   size_t mono_16khz_samples = stereo_32bit_samples;
@@ -427,22 +478,15 @@ void VoiceAssistantWebSocket::on_microphone_data_(const std::vector<uint8_t> &da
     this->mono_buffer_.resize(mono_16khz_samples);
   }
   
-  // Convert 32-bit stereo to 16-bit mono (16kHz)
-  // Take left channel (channel 0) and convert from 32-bit to 16-bit
   const int32_t *stereo_32bit = reinterpret_cast<const int32_t *>(data.data());
   int16_t *mono_16bit = this->mono_buffer_.data();
   
   for (size_t i = 0; i < stereo_32bit_samples; i++) {
-    // Left channel is first sample of each stereo pair (i * 2)
-    // Convert 32-bit to 16-bit by right-shifting 16 bits (discard lower 16 bits)
-    // This effectively takes the upper 16 bits of the 32-bit sample
     int32_t left_sample = stereo_32bit[i * 2];
     mono_16bit[i] = static_cast<int16_t>((left_sample >> 16));
   }
   
   // Resample from 16kHz to 24kHz (1.5x upsampling)
-  // Ratio: 24/16 = 1.5, so for every 2 samples at 16kHz we need 3 samples at 24kHz
-  // Use linear interpolation for better quality
   size_t resampled_24khz_samples = (mono_16khz_samples * INPUT_SAMPLE_RATE) / MICROPHONE_SAMPLE_RATE;
   if (this->resampled_buffer_.size() < resampled_24khz_samples) {
     this->resampled_buffer_.resize(resampled_24khz_samples);
@@ -452,33 +496,63 @@ void VoiceAssistantWebSocket::on_microphone_data_(const std::vector<uint8_t> &da
   
   // Linear interpolation resampling: 16kHz -> 24kHz
   for (size_t i = 0; i < resampled_24khz_samples; i++) {
-    // Calculate source position in 16kHz samples (with fractional part)
     float source_pos = (float)i * (float)MICROPHONE_SAMPLE_RATE / (float)INPUT_SAMPLE_RATE;
     size_t source_idx = (size_t)source_pos;
     float fraction = source_pos - source_idx;
     
     if (source_idx + 1 < mono_16khz_samples) {
-      // Linear interpolation between two samples
       int16_t sample0 = mono_16bit[source_idx];
       int16_t sample1 = mono_16bit[source_idx + 1];
       resampled_24khz[i] = static_cast<int16_t>(sample0 + (sample1 - sample0) * fraction);
     } else if (source_idx < mono_16khz_samples) {
-      // Last sample, no interpolation possible
       resampled_24khz[i] = mono_16bit[source_idx];
     } else {
-      // Beyond input, use last sample
       resampled_24khz[i] = mono_16bit[mono_16khz_samples - 1];
     }
   }
   
   size_t resampled_bytes = resampled_24khz_samples * BYTES_PER_SAMPLE;
-  
-  // Send resampled mono 16-bit audio (24kHz) to WebSocket
-  // Note: We don't track microphone audio for auto-stop because:
-  // - Microphone always sends audio (background noise, silence, etc.)
-  // - OpenAI's server_vad handles voice activity detection
-  // - If user speaks, OpenAI will generate new audio, which resets the speaker timer
   this->send_audio_chunk_(reinterpret_cast<const uint8_t *>(resampled_24khz), resampled_bytes);
+}
+
+bool VoiceAssistantWebSocket::is_bot_speaking() const {
+  // Bot is considered speaking if we received audio within the last 500ms
+  if (this->last_speaker_audio_time_ == 0) {
+    return false;  // No audio received yet
+  }
+  uint32_t time_since_last_audio = millis() - this->last_speaker_audio_time_;
+  return time_since_last_audio < 500;  // 500ms threshold
+}
+
+void VoiceAssistantWebSocket::interrupt() {
+  if (!this->is_connected() || this->websocket_client_ == nullptr) {
+    ESP_LOGW(TAG, "Cannot send interrupt - not connected");
+    return;
+  }
+  
+  ESP_LOGI(TAG, "Sending interrupt message to server");
+  
+  // Send interrupt message as JSON text frame
+  const char *interrupt_msg = "{\"type\":\"interrupt\"}";
+  int sent = esp_websocket_client_send_text(this->websocket_client_, interrupt_msg, strlen(interrupt_msg), portMAX_DELAY);
+  
+  if (sent < 0) {
+    ESP_LOGW(TAG, "Failed to send interrupt message");
+  } else {
+    ESP_LOGI(TAG, "Interrupt message sent successfully");
+    // Stop speaker immediately after sending interrupt
+    if (this->speaker_ != nullptr) {
+      this->speaker_->stop();
+    }
+    // Clear audio queue to free memory and prevent overflow
+    while (!this->audio_queue_.empty()) {
+      this->audio_queue_.pop();
+    }
+    // Set interrupt time to ignore incoming audio for a short period
+    // This gives the server time to process the interrupt and stop sending audio
+    this->interrupt_time_ = millis();
+    ESP_LOGI(TAG, "Cleared audio queue and ignoring incoming audio for %u ms", INTERRUPT_IGNORE_AUDIO_MS);
+  }
 }
 
 void VoiceAssistantWebSocket::websocket_event_handler_(void *handler_args, 

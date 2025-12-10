@@ -1,9 +1,11 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
+from esphome.automation import maybe_simple_id
 from esphome.components import microphone, speaker
 from esphome.const import CONF_ID, CONF_MICROPHONE, CONF_SPEAKER
 from esphome.core import CORE
+from esphome.components.esp32 import add_idf_component
 
 CODEOWNERS = ["@openai-realtime-voice-agent"]
 DEPENDENCIES = ["microphone", "speaker"]
@@ -38,6 +40,18 @@ async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     
+    # Add ESP-IDF components
+    if CORE.using_esp_idf:
+        # WebSocket client component
+        # Note: esp_websocket_client is a subdirectory in esp-protocols
+        # We need to add the entire repository and reference the component path
+        add_idf_component(
+            name="esp-protocols",
+            repo="https://github.com/espressif/esp-protocols.git",
+            ref="websocket-v1.6.0",
+            path="components/esp_websocket_client"
+        )
+    
     cg.add(var.set_server_url(config[CONF_SERVER_URL]))
     
     if CONF_MICROPHONE in config:
@@ -71,11 +85,6 @@ async def to_code(config):
 
 
 # Register actions and conditions
-# Import here to avoid circular import
-from esphome.automation import maybe_simple_id
-
-CONF_VOICE_ASSISTANT_WEBSOCKET_ID = "voice_assistant_websocket_id"
-
 VOICE_ASSISTANT_WEBSOCKET_ACTION_SCHEMA = maybe_simple_id(
     {
         cv.Required(CONF_ID): cv.use_id(VoiceAssistantWebSocket),
@@ -125,6 +134,26 @@ async def voice_assistant_websocket_is_running_to_code(config, condition_id, tem
     VOICE_ASSISTANT_WEBSOCKET_CONDITION_SCHEMA,
 )
 async def voice_assistant_websocket_is_connected_to_code(config, condition_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(condition_id, template_arg, paren)
+
+
+@automation.register_action(
+    "voice_assistant_websocket.interrupt",
+    voice_assistant_websocket_ns.class_("VoiceAssistantWebSocketInterruptAction"),
+    VOICE_ASSISTANT_WEBSOCKET_ACTION_SCHEMA,
+)
+async def voice_assistant_websocket_interrupt_to_code(config, action_id, template_arg, args):
+    paren = await cg.get_variable(config[CONF_ID])
+    return cg.new_Pvariable(action_id, template_arg, paren)
+
+
+@automation.register_condition(
+    "voice_assistant_websocket.is_bot_speaking",
+    voice_assistant_websocket_ns.class_("VoiceAssistantWebSocketIsBotSpeakingCondition"),
+    VOICE_ASSISTANT_WEBSOCKET_CONDITION_SCHEMA,
+)
+async def voice_assistant_websocket_is_bot_speaking_to_code(config, condition_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(condition_id, template_arg, paren)
 

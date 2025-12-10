@@ -63,7 +63,11 @@ class AudioRecorder:
         Args:
             audio_bytes: PCM audio bytes (16-bit, 24kHz, mono)
         """
-        if self._input_file:
+        if self._input_file and audio_bytes:
+            # Validate audio format: 16-bit = 2 bytes per sample
+            if len(audio_bytes) % 2 != 0:
+                logger.warning(f"⚠️ Input audio has odd byte count: {len(audio_bytes)}, padding with zero")
+                audio_bytes = audio_bytes + b'\x00'  # Pad with one zero byte
             self._input_file.write(audio_bytes)
             self._input_file.flush()  # Ensure data is written to disk
             self._input_bytes += len(audio_bytes)
@@ -75,7 +79,11 @@ class AudioRecorder:
         Args:
             audio_bytes: PCM audio bytes (16-bit, 24kHz, mono)
         """
-        if self._output_file:
+        if self._output_file and audio_bytes:
+            # Validate audio format: 16-bit = 2 bytes per sample
+            if len(audio_bytes) % 2 != 0:
+                logger.warning(f"⚠️ Output audio has odd byte count: {len(audio_bytes)}, padding with zero")
+                audio_bytes = audio_bytes + b'\x00'  # Pad with one zero byte
             self._output_file.write(audio_bytes)
             self._output_file.flush()  # Ensure data is written to disk
             self._output_bytes += len(audio_bytes)

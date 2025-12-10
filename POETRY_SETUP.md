@@ -1,116 +1,140 @@
 # Poetry Setup Guide
 
-Das Projekt nutzt jetzt Poetry für Dependency-Management.
+This project uses separate Poetry environments for the client and server components to avoid dependency conflicts.
 
-## Installation von Poetry
+## Project Structure
 
-Falls Poetry noch nicht installiert ist:
+- **Client** (`home-assistant-voice-pe/`): ESPHome configuration and compilation tools
+- **Server** (`openai_realtime_voice_agent/`): Pipecat-based OpenAI Realtime voice agent server
+- **Root**: Minimal workspace configuration
+
+## Installation
+
+### Client (ESPHome)
+
+For ESPHome configuration and compilation:
 
 ```bash
-# Linux/macOS
-curl -sSL https://install.python-poetry.org | python3 -
-
-# Oder mit pip
-pip install poetry
-```
-
-## Erste Einrichtung
-
-1. **Dependencies installieren** (inkl. Development-Dependencies):
-```bash
+cd home-assistant-voice-pe
 poetry install
 ```
 
-2. **Nur Production-Dependencies** (für Docker):
+This will install ESPHome and its dependencies in a separate virtual environment.
+
+### Server (Pipecat)
+
+For the OpenAI Realtime voice agent server:
+
 ```bash
-poetry install --no-dev
+cd openai_realtime_voice_agent
+poetry install
 ```
 
-## ESPHome für Kompilierung
+This will install Pipecat, OpenAI dependencies, and other server requirements in a separate virtual environment.
 
-ESPHome ist als Development-Dependency installiert und kann für die Kompilierung der ESPHome-Komponenten verwendet werden:
+## Usage
+
+### Client - ESPHome Compilation
 
 ```bash
-# ESPHome im Poetry-Environment nutzen
-poetry run esphome compile esphome_config.yaml
-
-# Oder direkt im Poetry-Shell
+cd home-assistant-voice-pe
 poetry shell
-esphome compile esphome_config.yaml
+esphome compile voice_pe_config.yaml
 ```
 
-## Entwicklung
+Or directly:
+```bash
+cd home-assistant-voice-pe
+poetry run esphome compile voice_pe_config.yaml
+```
 
-### Poetry Shell aktivieren
+### Server - Running the Voice Agent
 
 ```bash
+cd openai_realtime_voice_agent
 poetry shell
+python -m app.main
 ```
 
-Danach sind alle Dependencies verfügbar.
-
-### Dependencies hinzufügen
-
+Or directly:
 ```bash
-# Production-Dependency
+cd openai_realtime_voice_agent
+poetry run start
+```
+
+## Why Separate Projects?
+
+ESPHome and Pipecat have different dependency requirements that can conflict when installed in the same environment. By using separate Poetry projects:
+
+- Each component has its own virtual environment
+- No dependency conflicts
+- Cleaner dependency management
+- Easier to maintain and update independently
+
+## Development
+
+### Adding Dependencies
+
+**Client:**
+```bash
+cd home-assistant-voice-pe
 poetry add package-name
-
-# Development-Dependency
-poetry add --group dev package-name
 ```
 
-### Dependencies aktualisieren
-
+**Server:**
 ```bash
+cd openai_realtime_voice_agent
+poetry add package-name
+```
+
+### Updating Dependencies
+
+**Client:**
+```bash
+cd home-assistant-voice-pe
 poetry update
 ```
 
-### Lock-File aktualisieren
-
+**Server:**
 ```bash
-poetry lock
+cd openai_realtime_voice_agent
+poetry update
 ```
 
 ## Docker Build
 
-Das Dockerfile nutzt Poetry automatisch:
+The Dockerfile in `openai_realtime_voice_agent/` uses Poetry to install server dependencies:
 
 ```bash
-docker build -t ha-openai-realtime .
+cd openai_realtime_voice_agent
+docker build -t openai-realtime-voice-agent .
 ```
-
-Das Dockerfile:
-- Installiert Poetry
-- Kopiert `pyproject.toml` und `poetry.lock`
-- Installiert nur Production-Dependencies (`--no-dev`)
-- Entfernt Poetry-Dateien nach Installation
-
-## Migration von requirements.txt
-
-Die `requirements.txt` wurde durch `pyproject.toml` ersetzt. Alle Dependencies sind jetzt in Poetry definiert:
-
-- **Production**: `openai`, `websockets`, `numpy`, `python-dotenv`
-- **Development**: `esphome`
 
 ## Troubleshooting
 
-### Poetry-Lock-File fehlt
+### Poetry Lock File Issues
 
-Falls `poetry.lock` fehlt (z.B. beim ersten Setup):
+If you encounter lock file issues:
 
 ```bash
+# For client
+cd home-assistant-voice-pe
+poetry lock
+
+# For server
+cd openai_realtime_voice_agent
 poetry lock
 ```
 
-### Dependencies neu installieren
+### Virtual Environment Issues
 
+Each project creates its own virtual environment:
+- Client: `home-assistant-voice-pe/.venv`
+- Server: `openai_realtime_voice_agent/.venv`
+
+To recreate:
 ```bash
-poetry install --sync
+cd <project-directory>
+rm -rf .venv
+poetry install
 ```
-
-### Poetry-Cache leeren
-
-```bash
-poetry cache clear pypi --all
-```
-

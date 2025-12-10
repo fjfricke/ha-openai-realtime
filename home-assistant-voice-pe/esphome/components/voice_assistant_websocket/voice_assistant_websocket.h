@@ -7,6 +7,9 @@
 #ifdef USE_ESP_IDF
 #include "esp_websocket_client.h"
 #include "esp_http_client.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_system.h"
 #endif
 #include <string>
 #include <vector>
@@ -37,9 +40,11 @@ class VoiceAssistantWebSocket : public Component {
   void start();
   void stop();
   void request_start();
+  void interrupt();  // Send interrupt message to server and stop speaker
   
   bool is_running() const { return this->state_ == VOICE_ASSISTANT_WEBSOCKET_RUNNING; }
   bool is_connected() const { return this->websocket_client_ != nullptr && esp_websocket_client_is_connected(this->websocket_client_); }
+  bool is_bot_speaking() const;  // Check if bot is currently speaking (within 500ms of last audio)
   
   void set_state_callback(std::function<void(VoiceAssistantWebSocketState)> &&callback) {
     this->state_callback_ = std::move(callback);
@@ -64,7 +69,11 @@ class VoiceAssistantWebSocket : public Component {
   microphone::Microphone *microphone_{nullptr};
   speaker::Speaker *speaker_{nullptr};
   
+#ifdef USE_ESP_IDF
   esp_websocket_client_handle_t websocket_client_{nullptr};
+#else
+  void *websocket_client_{nullptr};
+#endif
   VoiceAssistantWebSocketState state_{VOICE_ASSISTANT_WEBSOCKET_IDLE};
   
   std::function<void(VoiceAssistantWebSocketState)> state_callback_;
@@ -80,13 +89,10 @@ class VoiceAssistantWebSocket : public Component {
   std::vector<uint8_t> output_buffer_;
   
   // Queue for audio data when speaker buffer is full
-  // Server now sends audio at playback rate, so we only need a small buffer
+  // Reduced size to prevent memory exhaustion
   std::queue<std::vector<uint8_t>> audio_queue_;
-  static const size_t MAX_QUEUE_DURATION_SECONDS = 5;  // Max 5 seconds of audio buffering
-  static const size_t BYTES_PER_SECOND = 48000;  // 24kHz * 2 bytes/sample (16-bit mono)
-  static const size_t MAX_QUEUE_BYTES = MAX_QUEUE_DURATION_SECONDS * BYTES_PER_SECOND;  // ~240KB for 5 seconds
-  static const size_t ESTIMATED_CHUNK_SIZE = 4096;  // Average chunk size in bytes
-  static const size_t MAX_QUEUE_SIZE = (MAX_QUEUE_BYTES / ESTIMATED_CHUNK_SIZE) + 10;  // ~60 chunks with safety margin
+  static const size_t MAX_QUEUE_SIZE = 10;  // Max 10 chunks (~40KB) to prevent memory overflow
+  static const size_t MIN_FREE_HEAP_BYTES = 15000;  // Minimum free heap required before queuing audio
   
   // Timing
   uint32_t last_audio_send_{0};
@@ -115,6 +121,8 @@ class VoiceAssistantWebSocket : public Component {
   static const uint32_t MAX_RECONNECT_ATTEMPTS = 5;
   static const uint32_t RECONNECT_DELAY_MS = 5000;
   uint32_t last_reconnect_attempt_{0};
+  uint32_t interrupt_time_{0};  // Time when interrupt was sent (to ignore audio for a short period)
+  static const uint32_t INTERRUPT_IGNORE_AUDIO_MS = 500;  // Ignore audio for 500ms after interrupt
 };
 
 // Action classes for automations (defined outside the main class)
@@ -147,6 +155,22 @@ template<typename... Ts> class VoiceAssistantWebSocketIsConnectedCondition : pub
  public:
   VoiceAssistantWebSocketIsConnectedCondition(VoiceAssistantWebSocket *parent) : parent_(parent) {}
   bool check(const Ts &...x) override { return this->parent_->is_connected(); }
+ protected:
+  VoiceAssistantWebSocket *parent_;
+};
+
+template<typename... Ts> class VoiceAssistantWebSocketIsBotSpeakingCondition : public Condition<Ts...> {
+ public:
+  VoiceAssistantWebSocketIsBotSpeakingCondition(VoiceAssistantWebSocket *parent) : parent_(parent) {}
+  bool check(const Ts &...x) override { return this->parent_->is_bot_speaking(); }
+ protected:
+  VoiceAssistantWebSocket *parent_;
+};
+
+template<typename... Ts> class VoiceAssistantWebSocketInterruptAction : public Action<Ts...> {
+ public:
+  VoiceAssistantWebSocketInterruptAction(VoiceAssistantWebSocket *parent) : parent_(parent) {}
+  void play(const Ts &...x) override { this->parent_->interrupt(); }
  protected:
   VoiceAssistantWebSocket *parent_;
 };
