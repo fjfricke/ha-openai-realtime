@@ -6,9 +6,6 @@ url: https://github.com/fjfricke/ha-openai-realtime
 arch:
   - aarch64
   - amd64
-  - armhf
-  - armv7
-  - i386
 init: false
 startup: application
 boot: auto
@@ -40,5 +37,3 @@ schema:
   session_reuse_timeout_seconds: int(0,3600)  # bis 1 Stunde
   enable_recording: bool
 image: ghcr.io/fjfricke/ha-openai-realtime/openai-realtime-voice-agent/{arch}
-
-
