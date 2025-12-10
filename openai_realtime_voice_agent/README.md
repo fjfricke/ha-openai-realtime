@@ -30,7 +30,10 @@ Configure the addon in Home Assistant:
 
 3. Optional settings:
    - `vad_threshold`: Voice activity detection threshold (0.0-1.0, default: 0.5)
-   - `instructions`: Custom instructions for the AI assistant
+   - `vad_prefix_padding_ms`: Audio padding before detection in milliseconds (default: 300)
+   - `vad_silence_duration_ms`: Duration of silence before stopping in milliseconds (default: 500)
+   - `instructions`: Custom instructions for the AI assistant (default: "You are the Home Assistant Voice Agent and can control the Smart Home.")
+   - `session_reuse_timeout_seconds`: Timeout for session reuse in seconds (default: 300, max: 3600)
    - `enable_recording`: Enable audio recording for debugging (default: false)
 
 4. Start the addon
