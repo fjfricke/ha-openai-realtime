@@ -188,8 +188,9 @@ class WebSocketHandler:
             logger.info("🎙️ Audio recording enabled - will record input and output audio")
         
         # Create pipeline runner and task
+        # Disable idle timeout - server should always stay ready for connections
         runner = PipelineRunner()
-        task = PipelineTask(pipeline)
+        task = PipelineTask(pipeline, idle_timeout_secs=None, cancel_on_idle_timeout=False)
         
         # Start pipeline in background
         asyncio.create_task(runner.run(task))
